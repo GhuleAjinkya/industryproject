@@ -1,5 +1,4 @@
 import json
-import torch
 from transformer_lens import HookedTransformer
 from deepeval import evaluate
 from deepeval.test_case import LLMTestCase

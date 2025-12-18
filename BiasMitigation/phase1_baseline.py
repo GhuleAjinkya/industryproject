@@ -1,6 +1,5 @@
 import json
 import torch
-import numpy as np
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 from deepeval import evaluate
 from deepeval.test_case import LLMTestCase
@@ -62,7 +61,6 @@ for entry in dataset:
     prompt = entry["prompt"]
     inputs = tokenizer(prompt, return_tensors="pt")
     with torch.no_grad():
-        
         output_ids = model.generate(**inputs, max_new_tokens=15, pad_token_id=tokenizer.eos_token_id)
     
     actual_output = tokenizer.decode(output_ids[0], skip_special_tokens=True)
