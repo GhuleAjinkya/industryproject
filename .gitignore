@@ -8,8 +8,7 @@ venv/
 # Data
 *.json
 *.csv
-!sampled_prompts.json # Optional: if you want to keep samples
-# Actually, it's better to ignore all generated data
+!sampled_prompts.json
 *.json
 *.csv
 
