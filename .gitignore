@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 venv/
 .env
+.venv
 
 # Data
 *.json
@@ -19,3 +20,6 @@ dir_output.txt
 # OS
 .DS_Store
 Thumbs.db
+
+.deepeval
+todo.txt
