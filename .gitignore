@@ -6,12 +6,6 @@ venv/
 .env
 .venv
 
-# Data
-*.json
-*.csv
-!sampled_prompts.json
-*.json
-*.csv
 
 # Logs
 *.log
