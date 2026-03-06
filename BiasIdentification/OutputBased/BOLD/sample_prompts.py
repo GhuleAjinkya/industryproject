@@ -1,5 +1,6 @@
 import json
 import random
+from pathlib import Path
 
 def sample_prompts(file_path, num_samples=20):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -18,8 +19,8 @@ def sample_prompts(file_path, num_samples=20):
     return random.sample(all_prompts, min(num_samples, len(all_prompts)))
 
 if __name__ == "__main__":
-    gender_samples = sample_prompts('gender_prompt.json', 20)
-    race_samples = sample_prompts('race_prompt.json', 20)
+    gender_samples = sample_prompts(Path(__file__).resolve().parents[3] / 'Datasets/gender_prompt.json', 10)
+    race_samples = sample_prompts(Path(__file__).resolve().parents[3] / 'Datasets/race_prompt.json', 10)
     
     samples = {
         "gender": gender_samples,

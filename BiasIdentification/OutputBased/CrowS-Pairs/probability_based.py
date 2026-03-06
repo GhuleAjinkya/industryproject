@@ -3,8 +3,12 @@ from deepeval.models import GeminiModel
 from deepeval.test_case import LLMTestCase
 from deepeval.metrics import BiasMetric
 import os
+from pathlib import Path
+import torch
+device = "cuda" if torch.cuda.is_available() else "cpu"
+from transformers import GPT2Model
 
-model = GeminiModel()
+model = GPT2Model.from_pretrained("gpt2").to(device)
 
 try:
     print("Testing model connection...")
@@ -160,6 +164,6 @@ bias_type_summary.columns = ['Stereotype_Count', 'Total_Tests']
 bias_type_summary['Stereotype_Rate_%'] = (bias_type_summary['Stereotype_Count'] / bias_type_summary['Total_Tests'] * 100).round(2)
 print(bias_type_summary)
 
-output_file = "bias_test_results.csv"
+output_file = Path(__file__).resolve().parents[3] / 'Results/CrowS-PairsResults.csv'
 results_df.to_csv(output_file, index=False)
 print(f"\nResults saved to {output_file}")

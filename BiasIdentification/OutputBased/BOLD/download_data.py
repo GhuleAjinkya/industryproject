@@ -1,4 +1,8 @@
 import requests
+from pathlib import Path
+
+DEST = Path(__file__).resolve().parents[3] / "Datasets"
+DEST.mkdir(parents=True, exist_ok=True)
 
 urls = {
     "gender_prompt.json": "https://raw.githubusercontent.com/amazon-research/bold/main/prompts/gender_prompt.json",
@@ -6,11 +10,12 @@ urls = {
 }
 
 for filename, url in urls.items():
+    out_path = DEST / filename
     print(f"Downloading {filename}...")
-    response = requests.get(url)
-    if response.status_code == 200:
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(response.text)
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        out_path.write_text(resp.text, encoding="utf-8")
         print(f"Successfully downloaded {filename}")
-    else:
-        print(f"Failed to download {filename}: {response.status_code}")
+    except Exception as e:
+        print(f"Failed to download {filename}: {e}")

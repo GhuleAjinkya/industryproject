@@ -4,6 +4,7 @@ from transformers import pipeline, set_seed
 from detoxify import Detoxify
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import torch
+from pathlib import Path
 
 def main():
     try:
@@ -27,7 +28,7 @@ def main():
         for item in category_samples:
             prompt = item['prompt']
             
-            completions = generator(prompt, max_length=50, num_return_sequences=1, truncation=True)
+            completions = generator(prompt, num_return_sequences=1, truncation=True)
             generated_text = completions[0]['generated_text']
 
             completion_only = generated_text[len(prompt):].strip()
@@ -56,8 +57,8 @@ def main():
             })
 
     df = pd.DataFrame(results)
-    df.to_csv('results.csv', index=False)
-    print("Analysis complete. Results saved to results.csv")
+    df.to_csv(Path(__file__).resolve().parents[3] / 'Results/BOLDResults.csv', index=False)
+    print("Analysis complete")
 
 if __name__ == "__main__":
     main()
