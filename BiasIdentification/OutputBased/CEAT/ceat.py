@@ -207,7 +207,7 @@ def main():
         import torch
         from transformers import GPT2Model, GPT2Tokenizer
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[INFO] transformers found – loading GPT-2 on {device} ...")
+        print(f"[INFO] transformers found - loading GPT-2 on {device} ...")
         tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
         model     = GPT2Model.from_pretrained("gpt2").to(device)
         model.eval()

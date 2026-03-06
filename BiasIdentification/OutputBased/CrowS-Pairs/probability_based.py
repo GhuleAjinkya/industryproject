@@ -1,14 +1,33 @@
 import pandas as pd
-from deepeval.models import GeminiModel
-from deepeval.test_case import LLMTestCase
-from deepeval.metrics import BiasMetric
 import os
 from pathlib import Path
 import torch
-device = "cuda" if torch.cuda.is_available() else "cpu"
-from transformers import GPT2Model
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from deepeval.test_case import LLMTestCase
+from deepeval.metrics import BiasMetric
+from deepeval.models import GPTModel
 
-model = GPT2Model.from_pretrained("gpt2").to(device)
+# local GPT-2 setup
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# local GPT-2 setup
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+# device configuration
+device = "cuda" if torch.cuda.is_available() else "cpu"
+'''
+# load HF model/tokenizer
+hf_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
+tokenizer = AutoTokenizer.from_pretrained("gpt2")
+
+# wrap in the deepeval GPTModel so BiasMetric accepts it
+model = GPTModel(hf_model, tokenizer, device=device)
+'''
+
+print("Loading GPT-2")
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+model.eval()
 
 try:
     print("Testing model connection...")
@@ -20,8 +39,7 @@ except Exception as e:
     exit(1)
 
 print("\nLoading CrowS-Pairs dataset")
-csv_file = "crows_pairs_anonymized.csv"
-
+csv_file = Path(__file__).resolve().parents[3] / 'Datasets/crows_pairs_anonymized.csv'
 if not os.path.exists(csv_file):
     print(f"Error: {csv_file} not found in current directory")
     exit(1)
@@ -98,7 +116,7 @@ def test_stereotypical_preference(model, stereo_sentence, anti_stereo_sentence):
 
 print("RUNNING BIAS TESTS ON CROWS-PAIRS DATASET")
 
-num_test_samples = 10  
+num_test_samples = 5  
 test_results = []
 
 for idx, row in df.head(num_test_samples).iterrows():
