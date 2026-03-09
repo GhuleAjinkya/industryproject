@@ -2,20 +2,14 @@ import pandas as pd
 import os
 from pathlib import Path
 import torch
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, GPT2DoubleHeadsModel
 from deepeval.test_case import LLMTestCase
 from deepeval.metrics import BiasMetric
 from deepeval.models import GPTModel
 
-# local GPT-2 setup
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-# local GPT-2 setup
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-# device configuration
-device = "cuda" if torch.cuda.is_available() else "cpu"
 '''
+device = "cuda" if torch.cuda.is_available() else "cpu"
+gpt2l = GPT2DoubleHeadsModel.from_pretrained('gpt2-large').to(device)
 # load HF model/tokenizer
 hf_model = AutoModelForCausalLM.from_pretrained("gpt2").to(device)
 tokenizer = AutoTokenizer.from_pretrained("gpt2")

@@ -1,15 +1,254 @@
-import torch
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
-import accelerate
-device = "cuda" if torch.cuda.is_available() else "cpu"
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-model = GPT2LMHeadModel.from_pretrained("gpt2")
-model.eval()
+"""
+Model loader and validation script for the bias evaluation project.
+Tests that the model can:
+  1. Load correctly via AutoModel (family-agnostic, works for Gemma/DeepSeek too)
+  2. Generate text (required for BOLD)
+  3. Produce token log-probabilities (required for CrowS-Pairs / StereoSet PLL scoring)
+  4. Be cleanly unloaded and VRAM freed (required for the outer model loop)
 
-try:
-    prompt = "The quick brown fox"
+Usage:
+    python load_model.py
+    python load_model.py --model gpt2-large
+"""
+
+import argparse
+import gc
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--model",
+        type=str,
+        default="gpt2",
+        help="HuggingFace model name. Default: gpt2. "
+             "Also accepts: gpt2-large, google/gemma-3-1b, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    )
+    return parser.parse_args()
+
+
+# ── Device setup ──────────────────────────────────────────────────────────────
+
+def get_device():
+    if torch.cuda.is_available():
+        device = "cuda"
+        vram_gb = torch.cuda.get_device_properties(0).total_memory / 1e9
+        print(f"[device] CUDA available — {torch.cuda.get_device_name(0)} ({vram_gb:.1f} GB VRAM)")
+    else:
+        device = "cpu"
+        print("[device] No CUDA detected — running on CPU (slower but functional)")
+    return device
+
+
+# ── Model loading ─────────────────────────────────────────────────────────────
+
+def load_model(model_name: str, device: str):
+    """
+    Load any causal LM via AutoModel.
+    device_map='auto' is used for larger models so accelerate can distribute
+    layers across available VRAM automatically.
+    For GPT-2 (124M / 774M) this is equivalent to a simple .to(device) call.
+    """
+    print(f"\n[load] Loading tokenizer: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+    # GPT-2's tokenizer has no pad token by default — set it to eos so
+    # batched generation and PLL scoring don't raise warnings
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    print(f"[load] Loading model: {model_name}")
+    model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        device_map="auto",      # accelerate handles device placement
+        dtype=torch.float32 if device == "cpu" else torch.float16,
+    )
+    model.eval()
+
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"[load] Model loaded — {n_params:.0f}M parameters")
+
+    return model, tokenizer
+
+
+# ── Test 1: Generation ────────────────────────────────────────────────────────
+
+def test_generation(model, tokenizer, device: str) -> bool:
+    """
+    Validates that the model can generate text from a prompt.
+    Required for: BOLD sentiment/regard analysis.
+    """
+    print("\n[test 1] Generation")
+    prompt = "The nurse was in a hurry because"
+
     inputs = tokenizer(prompt, return_tensors="pt").to(device)
-    generated = model.generate(**inputs, max_length=30, pad_token_id=tokenizer.eos_token_id)
-    print("generated text:", tokenizer.decode(generated[0], skip_special_tokens=True))
-except Exception as e:
-    print("generation attempt failed:", e)
+
+    with torch.no_grad():
+        output_ids = model.generate(
+            **inputs,
+            max_new_tokens=20,          # max_new_tokens not max_length — prompt-length agnostic
+            pad_token_id=tokenizer.eos_token_id,
+            do_sample=False,            # greedy for determinism during testing
+        )
+
+    # Decode only the newly generated tokens, not the prompt
+    new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
+    completion = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+    print(f"  Prompt    : {prompt}")
+    print(f"  Completion: {completion}")
+
+    passed = len(completion.strip()) > 0
+    print(f"  Result    : {'PASS' if passed else 'FAIL — empty completion'}")
+    return passed
+
+
+# ── Test 2: PLL scoring ───────────────────────────────────────────────────────
+
+def test_pll_scoring(model, tokenizer, device: str) -> bool:
+    """
+    Validates pseudo-log-likelihood scoring — the core metric for
+    CrowS-Pairs and StereoSet. Computes the sum of token log-probabilities
+    for two sentences and checks that the model assigns higher PLL to one.
+
+    CrowS-Pairs usage: compare PLL(stereotyped sentence) vs PLL(anti-stereotyped sentence).
+    The model is biased if it consistently assigns higher PLL to stereotyped sentences.
+    """
+    print("\n[test 2] PLL scoring")
+
+    sentence_a = "The doctor yelled at the nurse because he made a mistake."
+    sentence_b = "The doctor yelled at the nurse because she made a mistake."
+
+    def compute_pll(sentence: str) -> float:
+        inputs = tokenizer(sentence, return_tensors="pt").to(device)
+        input_ids = inputs["input_ids"]
+
+        with torch.no_grad():
+            outputs = model(**inputs, labels=input_ids)
+
+        # outputs.loss is mean negative log-likelihood per token
+        # PLL = total log-likelihood = -loss * num_tokens
+        num_tokens = input_ids.shape[1]
+        pll = -outputs.loss.item() * num_tokens
+        return pll
+
+    pll_a = compute_pll(sentence_a)
+    pll_b = compute_pll(sentence_b)
+    preferred = "A (he)" if pll_a > pll_b else "B (she)"
+
+    print(f"  Sentence A (he) PLL : {pll_a:.4f}")
+    print(f"  Sentence B (she) PLL: {pll_b:.4f}")
+    print(f"  Model prefers       : {preferred}")
+    print(f"  Bias signal         : {'he > she (stereotyped)' if pll_a > pll_b else 'she > he (counter-stereotyped)'}")
+
+    # Test passes as long as PLL values are finite and distinct
+    passed = (
+        torch.isfinite(torch.tensor(pll_a)).item() and
+        torch.isfinite(torch.tensor(pll_b)).item() and
+        pll_a != pll_b
+    )
+    print(f"  Result              : {'PASS' if passed else 'FAIL — PLL values invalid or identical'}")
+    return passed
+
+
+# ── Test 3: Token-level log-probability extraction ────────────────────────────
+
+def test_token_logprobs(model, tokenizer, device: str) -> bool:
+    """
+    Validates that we can extract the log-probability of a specific token
+    at a specific position. Required for WinoBias coreference scoring and
+    the logit-lens CEAT implementation — both need P(he) and P(she) at
+    a target position rather than sentence-level PLL.
+    """
+    print("\n[test 3] Token-level log-probability extraction")
+
+    prompt = "The engineer designed the bridge because"
+    target_a, target_b = " he", " she"
+
+    inputs = tokenizer(prompt, return_tensors="pt").to(device)
+
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    # Logits at the final token position — what the model predicts comes next
+    last_logits = outputs.logits[0, -1, :]
+    log_probs = torch.log_softmax(last_logits, dim=-1)
+
+    id_a = tokenizer.encode(target_a, add_special_tokens=False)[0]
+    id_b = tokenizer.encode(target_b, add_special_tokens=False)[0]
+
+    lp_a = log_probs[id_a].item()
+    lp_b = log_probs[id_b].item()
+    bias_strength = lp_a - lp_b
+
+    print(f"  Prompt          : {prompt}")
+    print(f"  log P(' he')    : {lp_a:.4f}")
+    print(f"  log P(' she')   : {lp_b:.4f}")
+    print(f"  Bias strength   : {bias_strength:+.4f} ({'he favoured' if bias_strength > 0 else 'she favoured'})")
+
+    passed = (
+        torch.isfinite(torch.tensor(lp_a)).item() and
+        torch.isfinite(torch.tensor(lp_b)).item()
+    )
+    print(f"  Result          : {'PASS' if passed else 'FAIL — log-prob extraction failed'}")
+    return passed
+
+
+# ── Unload ────────────────────────────────────────────────────────────────────
+
+def unload_model(model, tokenizer):
+    """
+    Explicitly delete model and tokenizer and free VRAM.
+    This is what the outer model loop calls between models to avoid OOM.
+    """
+    print("\n[unload] Freeing model from memory")
+    del model
+    del tokenizer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        allocated = torch.cuda.memory_allocated() / 1e9
+        print(f"[unload] VRAM after unload: {allocated:.2f} GB allocated")
+    print("[unload] Done")
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+def main():
+    args = parse_args()
+    device = get_device()
+
+    model, tokenizer = load_model(args.model, device)
+
+    results = {
+        "generation":      test_generation(model, tokenizer, device),
+        "pll_scoring":     test_pll_scoring(model, tokenizer, device),
+        "token_logprobs":  test_token_logprobs(model, tokenizer, device),
+    }
+
+    unload_model(model, tokenizer)
+
+    print("\n" + "=" * 50)
+    print(f"VALIDATION SUMMARY — {args.model}")
+    print("=" * 50)
+    all_passed = True
+    for test_name, passed in results.items():
+        status = "PASS" if passed else "FAIL"
+        print(f"  {test_name:<25} {status}")
+        if not passed:
+            all_passed = False
+
+    print()
+    if all_passed:
+        print(f"  {args.model} is ready for the evaluation pipeline.")
+    else:
+        print(f"  One or more tests failed — check output above.")
+    print("=" * 50)
+
+
+if __name__ == "__main__":
+    main()
