@@ -14,7 +14,9 @@ Usage:
 import argparse
 import gc
 import torch
+from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
+from BOLD.analyze_bold import run_bold
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -27,6 +29,12 @@ def parse_args():
         default="gpt2",
         help="HuggingFace model name. Default: gpt2. "
              "Also accepts: gpt2-large, google/gemma-3-1b, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+    )
+    parser.add_argument(
+        "--skip-bold",
+        action="store_true",
+        default=False,
+        help="Skip BOLD analysis after validation (useful for quick testing)"
     )
     return parser.parse_args()
 
@@ -216,6 +224,34 @@ def unload_model(model, tokenizer):
     print("[unload] Done")
 
 
+# ── Public interface for other scripts ───────────────────────────────────────
+
+def run_tests(model, tokenizer, device: str) -> dict:
+    """
+    Run all three validation tests on a pre-loaded model.
+    Returns a dict of {test_name: bool} so the caller can decide
+    whether to proceed with the evaluation pipeline.
+
+    Called by analyze_bold.py and the outer evaluation loop before
+    running any benchmark — acts as a gate that catches broken model
+    loads before they waste time on a full test battery.
+
+    Example
+    -------
+    from load_model import load_model, run_tests, get_device
+
+    device = get_device()
+    model, tokenizer = load_model("gpt2", device)
+    if all(run_tests(model, tokenizer, device).values()):
+        run_bold(model, tokenizer, ...)
+    """
+    return {
+        "generation":     test_generation(model, tokenizer, device),
+        "pll_scoring":    test_pll_scoring(model, tokenizer, device),
+        "token_logprobs": test_token_logprobs(model, tokenizer, device),
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -223,13 +259,7 @@ def main():
     device = get_device()
 
     model, tokenizer = load_model(args.model, device)
-
-    results = {
-        "generation":      test_generation(model, tokenizer, device),
-        "pll_scoring":     test_pll_scoring(model, tokenizer, device),
-        "token_logprobs":  test_token_logprobs(model, tokenizer, device),
-    }
-
+    results = run_tests(model, tokenizer, device)
     unload_model(model, tokenizer)
 
     print("\n" + "=" * 50)
@@ -245,6 +275,24 @@ def main():
     print()
     if all_passed:
         print(f"  {args.model} is ready for the evaluation pipeline.")
+        if not args.skip_bold:
+            print(f"\n[main] Starting BOLD bias analysis...")
+            bold_dir = Path(__file__).resolve().parent / "BOLD"
+            samples_path = str(bold_dir / "sampled_prompts.json")
+            results_dir = Path(__file__).resolve().parent / "Results"
+            
+            try:
+                summary = run_bold(
+                    model=model,
+                    tokenizer=tokenizer,
+                    model_name=args.model,
+                    device=device,
+                    samples_path=samples_path,
+                    results_dir=results_dir,
+                )
+                print(f"\n[main] BOLD analysis complete. Results saved to {results_dir}")
+            except Exception as e:
+                print(f"[main] ERROR during BOLD analysis: {e}")
     else:
         print(f"  One or more tests failed — check output above.")
     print("=" * 50)

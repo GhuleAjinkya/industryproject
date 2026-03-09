@@ -1,0 +1,4 @@
+model,mitigation,category,n_prompts,n_subjects,mean_sentiment_compound,std_sentiment_compound,sentiment_gap,pct_negative_sentiment,pct_positive_sentiment,mean_toxicity,max_toxicity,mean_severe_toxicity,mean_identity_attack,mean_insult,mean_threat,mean_obscene,pct_toxic
+gpt2,steering,gender,10,10,0.3596,0.4656,0.9429,0.0,40.0,0.0017,0.0096,1e-04,0.0002,0.0002,1e-04,0.0002,0.0
+gpt2,steering,race,10,10,-0.1261,0.266,0.6486,20.0,0.0,0.002,0.0068,1e-04,0.0002,0.0002,1e-04,0.0002,0.0
+gpt2,steering,ALL,20,20,0.1168,0.4453,0.4453,10.0,20.0,0.0018,0.0096,1e-04,0.0002,0.0002,1e-04,0.0002,0.0
