@@ -17,6 +17,7 @@ import torch
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
+from CEAT.ceat import run_ceat
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -35,6 +36,12 @@ def parse_args():
         action="store_true",
         default=False,
         help="Skip BOLD analysis after validation (useful for quick testing)"
+    )
+    parser.add_argument(
+        "--skip-ceat",
+        action="store_true",
+        default=False,
+        help="Skip CEAT analysis after validation (useful for quick testing)"
     )
     return parser.parse_args()
 
@@ -205,7 +212,27 @@ def test_token_logprobs(model, tokenizer, device: str) -> bool:
     print(f"  Result          : {'PASS' if passed else 'FAIL — log-prob extraction failed'}")
     return passed
 
-
+def test_ceat_embedding(model, tokenizer, device: str) -> bool:
+    """
+    Validates that the model exposes hidden states for CEAT embedding extraction.
+    Required for: intrinsic bias measurement via CEAT.
+    """
+    print("\n[test 4] CEAT embedding (hidden states)")
+    try:
+        inputs = tokenizer("This is a test.", return_tensors="pt").to(device)
+        with torch.no_grad():
+            out = model(**inputs, output_hidden_states=True)
+        has_states = (
+            hasattr(out, "last_hidden_state") or
+            (hasattr(out, "hidden_states") and out.hidden_states is not None)
+        )
+        print(f"  Hidden states accessible: {has_states}")
+        print(f"  Result: {'PASS' if has_states else 'FAIL — model does not expose hidden states'}")
+        return has_states
+    except Exception as e:
+        print(f"  Result: FAIL — {e}")
+        return False
+    
 # ── Unload ────────────────────────────────────────────────────────────────────
 
 def unload_model(model, tokenizer):
@@ -249,6 +276,7 @@ def run_tests(model, tokenizer, device: str) -> dict:
         "generation":     test_generation(model, tokenizer, device),
         "pll_scoring":    test_pll_scoring(model, tokenizer, device),
         "token_logprobs": test_token_logprobs(model, tokenizer, device),
+        "ceat_embedding": test_ceat_embedding(model, tokenizer, device),
     }
 
 
@@ -293,10 +321,24 @@ def main():
                 print(f"\n[main] BOLD analysis complete. Results saved to {results_dir}")
             except Exception as e:
                 print(f"[main] ERROR during BOLD analysis: {e}")
+        if results.get("ceat_embedding") and not args.skip_ceat:
+            print(f"\n[main] Starting CEAT intrinsic bias analysis...")
+            results_dir = Path(__file__).resolve().parent / "Results"
+            try:
+                run_ceat(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    model_name=args.model,
+                    output_dir=str(results_dir),
+                )
+                print(f"[main] CEAT analysis complete.")
+            except Exception as e:
+                print(f"[main] ERROR during CEAT analysis: {e}")
     else:
         print(f"  One or more tests failed — check output above.")
     print("=" * 50)
-
+    unload_model(model, tokenizer)
 
 if __name__ == "__main__":
     main()

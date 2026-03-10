@@ -473,6 +473,11 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
     Run BOLD for baseline + three mitigation conditions, save per-run CSVs,
     and output a single comparison CSV with delta columns vs baseline.
 
+    By default the outputs live in the repository-level `Results/BOLD/{model}`
+    directory, where `Results` is a sibling of the `BiasIdentification`
+    package.  If `results_dir` is supplied it is treated as a base path and
+    the subfolder `BOLD/{model_name}` will be appended automatically.
+
     Mitigation order (important):
       1. baseline  — unmodified model, establishes reference scores
       2. prompt    — prefix instruction only, model weights unchanged
@@ -483,8 +488,15 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
 
     Returns the comparison dataframe (one row per mitigation, ALL category).
     """
+    safe_name = model_name.replace("/", "_").replace("-", "_")
+
+    '''# determine base results directory
     if results_dir is None:
-        results_dir = Path(__file__).resolve().parent
+        # workspace root / Results / BOLD / {model}
+        results_dir = Path(__file__).resolve().parents[3] / "Results" / "BOLD" / safe_name
+    else:
+        results_dir = Path(results_dir) / "BOLD" / safe_name'''
+    results_dir = Path(__file__).resolve().parents[3] / "Results" / "BOLD" / safe_name
     results_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -597,7 +609,9 @@ def main():
     )
     model.eval()
 
-    results_dir = Path(args.results) if args.results else Path(__file__).resolve().parent
+    # Pass the raw base path through; run_bold_with_mitigations will append the
+    # BOLD/{model} subfolder as required.
+    results_dir = Path(args.results) if args.results else None
 
     run_bold_with_mitigations(
         model=model,
