@@ -27,6 +27,7 @@ import os
 import io
 import argparse
 from contextlib import redirect_stdout
+from pathlib import Path
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -206,7 +207,7 @@ def interpret(es):
 # 4.  CORE RUNNER  (model-agnostic, called by load_model or standalone)
 # ══════════════════════════════════════════════════════════════════════
 
-def run_ceat(model, tokenizer, device, model_name="unknown", output_dir="Results"):
+def run_ceat(model, tokenizer, device, model_name="unknown", output_dir= Path(__file__).resolve().parents[3] / "Results" / "CEAT"):
     """
     Run all three CEAT tests against a pre-loaded model.
 
@@ -224,7 +225,8 @@ def run_ceat(model, tokenizer, device, model_name="unknown", output_dir="Results
     """
     os.makedirs(output_dir, exist_ok=True)
     slug = model_name.replace("/", "_").replace(" ", "_")
-
+    output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT" / slug
+    output_dir.mkdir(parents=True, exist_ok=True)
     # Capture all print output into a string for the TXT file
     buffer = io.StringIO()
 
@@ -432,8 +434,9 @@ def main():
 
     run_ceat(model, tokenizer, device,
              model_name=args.model,
-             output_dir=args.output_dir)
+             output_dir=Path(__file__).resolve().parents[3] / "Results" / "CEAT")
 
 
 if __name__ == "__main__":
     main()
+    

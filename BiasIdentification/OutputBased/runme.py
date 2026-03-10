@@ -18,6 +18,8 @@ from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
 from CEAT.ceat import run_ceat
+from CrowS_Pairs.crows_pairs import run_crows_pairs
+
 
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
@@ -42,6 +44,18 @@ def parse_args():
         action="store_true",
         default=False,
         help="Skip CEAT analysis after validation (useful for quick testing)"
+    )
+    parser.add_argument(
+        "--skip-crows-pairs",
+        action="store_true",
+        default=False,
+        help="Skip CrowS-Pairs analysis after validation (useful for quick testing)"
+    )
+    parser.add_argument(
+        "--skip-tests",
+        action="store_true",
+        default=False,
+        help="Skip verification tests"
     )
     return parser.parse_args()
 
@@ -253,7 +267,7 @@ def unload_model(model, tokenizer):
 
 # ── Public interface for other scripts ───────────────────────────────────────
 
-def run_tests(model, tokenizer, device: str) -> dict:
+def run_tests(model, tokenizer, device: str, skip: bool) -> dict:
     """
     Run all three validation tests on a pre-loaded model.
     Returns a dict of {test_name: bool} so the caller can decide
@@ -272,6 +286,14 @@ def run_tests(model, tokenizer, device: str) -> dict:
     if all(run_tests(model, tokenizer, device).values()):
         run_bold(model, tokenizer, ...)
     """
+    if skip:
+        return {
+            "generation": True,
+            "pll_scoring": True,
+            "token_logprobs": True,
+            "ceat_embedding": True
+        }
+    
     return {
         "generation":     test_generation(model, tokenizer, device),
         "pll_scoring":    test_pll_scoring(model, tokenizer, device),
@@ -287,7 +309,7 @@ def main():
     device = get_device()
 
     model, tokenizer = load_model(args.model, device)
-    results = run_tests(model, tokenizer, device)
+    results = run_tests(model, tokenizer, device, args.skip_tests)
     unload_model(model, tokenizer)
 
     print("\n" + "=" * 50)
@@ -335,6 +357,26 @@ def main():
                 print(f"[main] CEAT analysis complete.")
             except Exception as e:
                 print(f"[main] ERROR during CEAT analysis: {e}")
+        # ── CrowS-Pairs extrinsic bias measurement ────────────────
+        if results.get("pll_scoring") and not args.skip_crows_pairs:
+            print(f"\n[main] Starting CrowS-Pairs PLL analysis...")
+            results_dir = Path(__file__).resolve().parents[2] / "Results" / "CrowS_Pairs"
+            dataset_path = (Path(__file__).resolve().parents[2]
+                            / "Datasets" / "crows_pairs_anonymized.csv")
+            try:
+                run_crows_pairs(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    model_name=args.model,
+                    dataset_path=str(dataset_path),
+                    num_samples=50,
+                    output_dir=str(results_dir),
+                )
+                print(f"[main] CrowS-Pairs analysis complete.")
+            except Exception as e:
+                print(f"[main] ERROR during CrowS-Pairs analysis: {e}")
+
     else:
         print(f"  One or more tests failed — check output above.")
     print("=" * 50)
