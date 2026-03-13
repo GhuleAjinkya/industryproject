@@ -7,24 +7,6 @@ Runs the full BOLD test battery four times per model:
   3. steering       — activation steering hook on the identified bias layer
   4. inlp           — gender/race subspace projected out of token embeddings
 
-Outputs per run:
-  BOLDResults_raw_{model}_{mitigation}.csv     — one row per prompt
-  BOLDResults_summary_{model}_{mitigation}.csv — aggregated scorecard
-
-Outputs combined:
-  BOLDResults_comparison_{model}.csv — all four summary rows side by side,
-                                        with delta columns vs baseline
-
-Usage (standalone):
-    python analyze_bold.py --model gpt2
-
-Usage (from evaluation loop):
-    from analyze_bold import run_bold_with_mitigations
-    comparison = run_bold_with_mitigations(model, tokenizer,
-                                           model_name="gpt2",
-                                           device="cuda",
-                                           samples_path="sampled_prompts.json",
-                                           results_dir=Path("Results"))
 """
 
 import copy
@@ -39,21 +21,12 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from sklearn.decomposition import PCA
 
-
-# ══════════════════════════════════════════════════════════════════════
 # 1.  GENERATION
-# ══════════════════════════════════════════════════════════════════════
 
 def generate_completion(prompt: str, model, tokenizer, device: str,
                         max_new_tokens: int = 40,
                         prefix: str = "") -> str:
-    """
-    Generate a completion for a prompt using the pre-loaded model.
 
-    prefix: optional string prepended to every prompt for prompt-based
-            mitigation. Stripped from output so scoring only sees the
-            completion of the original prompt.
-    """
     full_prompt = prefix + prompt if prefix else prompt
 
     inputs = tokenizer(
@@ -81,11 +54,9 @@ def generate_completion(prompt: str, model, tokenizer, device: str,
     return completion
 
 
-# ══════════════════════════════════════════════════════════════════════
 # 2.  MITIGATION METHODS
-# ══════════════════════════════════════════════════════════════════════
 
-# ── 2a. Prompt-based mitigation ───────────────────────────────────────
+# 2a. Prompt-based mitigation 
 
 DEBIAS_PREFIX = (
     "Respond factually and without making any assumptions based on "
@@ -96,26 +67,15 @@ DEBIAS_PREFIX = (
 
 def generate_with_prompt_mitigation(prompt: str, model, tokenizer,
                                     device: str) -> str:
-    """
-    Intra-processing mitigation: prepend a debiasing instruction to every
-    prompt before generation. No model weights are modified.
 
-    Targets: sentiment gap, identity_attack, toxicity.
-    Works on all model families without any architectural assumptions.
-    """
     return generate_completion(prompt, model, tokenizer, device,
                                prefix=DEBIAS_PREFIX)
 
 
-# ── 2b. Activation steering ───────────────────────────────────────────
+# 2b. Activation steering 
 
 def _find_bias_layer(model, tokenizer, device: str) -> int:
-    """
-    Identify the layer whose residual stream contributes most to the
-    he > she logit gap on a representative gendered prompt.
-    Replicates phase2_tracing.py logic on a standard HuggingFace model.
-    Returns the layer index with the highest cumulative bias contribution.
-    """
+
     probe_prompt = "The engineer designed the bridge because"
     inputs  = tokenizer(probe_prompt, return_tensors="pt").to(device)
     he_id   = tokenizer.encode(" he",  add_special_tokens=False)[0]
@@ -171,14 +131,7 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
                             gender_dir: torch.Tensor,
                             race_dir:   torch.Tensor,
                             alpha: float = 3.0) -> str:
-    """
-    Intra-processing mitigation: subtract gender and race bias directions
-    from the residual stream at the identified bias layer during the forward
-    pass via a HuggingFace forward hook.
 
-    The hook is registered and removed per call — no permanent weight change.
-    alpha=3.0 is conservative; increase to 5.0 for stronger intervention.
-    """
     inputs = tokenizer(
         prompt,
         return_tensors="pt",
@@ -187,9 +140,6 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
     ).to(device)
 
     def _steering_hook(module, input, output):
-        # GPT-2 MLP returns a plain tensor, not a tuple.
-        # Gemma/LLaMA MLPs may return a tuple where the first element
-        # is the hidden tensor. Handle both cases explicitly.
         if isinstance(output, torch.Tensor):
             hidden = output.float()
             hidden = hidden - alpha * gender_dir
@@ -201,7 +151,6 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
             hidden = hidden - alpha * race_dir
             return (hidden.to(output[0].dtype),) + tuple(output[1:])
 
-    # Attach hook — supports GPT-2 and Gemma/LLaMA architecture paths
     try:
         layer_module = model.transformer.h[bias_layer].mlp
     except AttributeError:
@@ -222,7 +171,7 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
                 do_sample=False,
             )
     finally:
-        handle.remove()     # Always removed — model is clean after this call
+        handle.remove()  
 
     new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
     completion = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
@@ -231,18 +180,9 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
     return completion
 
 
-# ── 2c. INLP — Iterative Nullspace Projection ────────────────────────
+# 2c. INLP — Iterative Nullspace Projection 
 
 def apply_inlp(model, tokenizer, device: str, n_components: int = 5) -> None:
-    """
-    Post-processing (embedding-level) mitigation: identify the gender and
-    race bias subspace in the input embedding matrix using PCA over word
-    pairs, then project it out by applying the nullspace projection matrix
-    P = I - V^T V to every row of the embedding table.
-
-    Modifies the model's embedding matrix IN PLACE.
-    Caller is responsible for saving and restoring weights around this call.
-    """
     gender_pairs = [
         ("he", "she"), ("him", "her"), ("his", "hers"),
         ("man", "woman"), ("boy", "girl"), ("father", "mother"),
@@ -277,10 +217,7 @@ def apply_inlp(model, tokenizer, device: str, n_components: int = 5) -> None:
 
     print("[inlp] Embedding matrix updated.")
 
-
-# ══════════════════════════════════════════════════════════════════════
 # 3.  SCORING & AGGREGATION
-# ══════════════════════════════════════════════════════════════════════
 
 def score_completion(completion: str, detoxifier, analyzer) -> dict:
     tox  = detoxifier.predict(completion)
@@ -354,9 +291,6 @@ def aggregate_results(df: pd.DataFrame, model_name: str,
     return pd.DataFrame(rows)
 
 
-# ══════════════════════════════════════════════════════════════════════
-# 4.  SINGLE-RUN WORKER
-# ══════════════════════════════════════════════════════════════════════
 
 def _run_single(samples: dict, model, tokenizer, device: str,
                 model_name: str, mitigation: str,
@@ -390,7 +324,6 @@ def _run_single(samples: dict, model, tokenizer, device: str,
 
             elif mitigation == "inlp":
                 # Weights already modified by apply_inlp() before this loop.
-                # Generation is identical to baseline — the projection does the work.
                 completion = generate_completion(prompt, model, tokenizer, device)
 
             else:
@@ -416,9 +349,7 @@ def _run_single(samples: dict, model, tokenizer, device: str,
     return raw_df, summary_df
 
 
-# ══════════════════════════════════════════════════════════════════════
 # 5.  COMPARISON TABLE
-# ══════════════════════════════════════════════════════════════════════
 
 SCORE_COLS = [
     "mean_sentiment_compound", "sentiment_gap",
@@ -461,41 +392,22 @@ def build_comparison(summaries: dict, model_name: str) -> pd.DataFrame:
 
     return comparison_df
 
-
-# ══════════════════════════════════════════════════════════════════════
 # 6.  MAIN PUBLIC FUNCTION
-# ══════════════════════════════════════════════════════════════════════
 
 def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
                                samples_path: str = "sampled_prompts.json",
                                results_dir: Path = None) -> pd.DataFrame:
     """
-    Run BOLD for baseline + three mitigation conditions, save per-run CSVs,
-    and output a single comparison CSV with delta columns vs baseline.
-
-    By default the outputs live in the repository-level `Results/BOLD/{model}`
-    directory, where `Results` is a sibling of the `BiasIdentification`
-    package.  If `results_dir` is supplied it is treated as a base path and
-    the subfolder `BOLD/{model_name}` will be appended automatically.
-
-    Mitigation order (important):
+    Mitigation order:
       1. baseline  — unmodified model, establishes reference scores
       2. prompt    — prefix instruction only, model weights unchanged
       3. steering  — forward hook per call, model weights unchanged
       4. inlp      — modifies embedding matrix in-place; embedding checkpoint
                      is saved before and restored after so the model object
                      is clean when returned to the caller
-
-    Returns the comparison dataframe (one row per mitigation, ALL category).
     """
     safe_name = model_name.replace("/", "_").replace("-", "_")
 
-    '''# determine base results directory
-    if results_dir is None:
-        # workspace root / Results / BOLD / {model}
-        results_dir = Path(__file__).resolve().parents[3] / "Results" / "BOLD" / safe_name
-    else:
-        results_dir = Path(results_dir) / "BOLD" / safe_name'''
     results_dir = Path(__file__).resolve().parents[3] / "Results" / "BOLD" / safe_name
     results_dir.mkdir(parents=True, exist_ok=True)
 
@@ -512,7 +424,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
     safe_name  = model_name.replace("/", "_").replace("-", "_")
     summaries  = {}
 
-    # ── Run 1: Baseline ───────────────────────────────────────────────
     print("\n[bold] === RUN 1/4 : BASELINE ===")
     raw_df, summary_df = _run_single(
         samples, model, tokenizer, device,
@@ -521,7 +432,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
     raw_df.to_csv(    results_dir / f"BOLDResults_raw_{safe_name}_baseline.csv",     index=False)
     summary_df.to_csv(results_dir / f"BOLDResults_summary_{safe_name}_baseline.csv", index=False)
 
-    # ── Run 2: Prompt mitigation ──────────────────────────────────────
     print("\n[bold] === RUN 2/4 : PROMPT MITIGATION ===")
     raw_df, summary_df = _run_single(
         samples, model, tokenizer, device,
@@ -530,7 +440,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
     raw_df.to_csv(    results_dir / f"BOLDResults_raw_{safe_name}_prompt.csv",     index=False)
     summary_df.to_csv(results_dir / f"BOLDResults_summary_{safe_name}_prompt.csv", index=False)
 
-    # ── Run 3: Activation steering ────────────────────────────────────
     print("\n[bold] === RUN 3/4 : ACTIVATION STEERING ===")
     bias_layer = _find_bias_layer(model, tokenizer, device)
     gender_dir = _build_gender_direction(model, tokenizer, device)
@@ -544,7 +453,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
     raw_df.to_csv(    results_dir / f"BOLDResults_raw_{safe_name}_steering.csv",     index=False)
     summary_df.to_csv(results_dir / f"BOLDResults_summary_{safe_name}_steering.csv", index=False)
 
-    # ── Run 4: INLP (destructive — save/restore embeddings) ──────────
     print("\n[bold] === RUN 4/4 : INLP ===")
     print("[inlp] Saving embedding checkpoint...")
     embed_checkpoint = model.get_input_embeddings().weight.data.clone()
@@ -563,7 +471,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
         model.get_input_embeddings().weight.copy_(embed_checkpoint)
     print("[inlp] Embeddings restored — model is clean.")
 
-    # ── Comparison table ──────────────────────────────────────────────
     comparison_df = build_comparison(summaries, model_name)
     comp_path = results_dir / f"BOLDResults_comparison_{safe_name}.csv"
     comparison_df.to_csv(comp_path, index=False)
@@ -571,8 +478,6 @@ def run_bold_with_mitigations(model, tokenizer, model_name: str, device: str,
 
     return comparison_df
 
-
-# Backwards-compatible alias for scripts calling the old run_bold() signature
 def run_bold(model, tokenizer, model_name: str, device: str,
              samples_path: str = "sampled_prompts.json",
              results_dir: Path = None) -> pd.DataFrame:
@@ -580,10 +485,6 @@ def run_bold(model, tokenizer, model_name: str, device: str,
         model, tokenizer, model_name, device,
         samples_path=samples_path, results_dir=results_dir)
 
-
-# ══════════════════════════════════════════════════════════════════════
-# 7.  STANDALONE ENTRY POINT
-# ══════════════════════════════════════════════════════════════════════
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -609,8 +510,6 @@ def main():
     )
     model.eval()
 
-    # Pass the raw base path through; run_bold_with_mitigations will append the
-    # BOLD/{model} subfolder as required.
     results_dir = Path(args.results) if args.results else None
 
     run_bold_with_mitigations(

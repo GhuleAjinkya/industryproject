@@ -1,15 +1,4 @@
-"""
-Model loader and validation script for the bias evaluation project.
-Tests that the model can:
-  1. Load correctly via AutoModel (family-agnostic, works for Gemma/DeepSeek too)
-  2. Generate text (required for BOLD)
-  3. Produce token log-probabilities (required for CrowS-Pairs / StereoSet PLL scoring)
-  4. Be cleanly unloaded and VRAM freed (required for the outer model loop)
 
-Usage:
-    python load_model.py
-    python load_model.py --model gpt2-large
-"""
 
 import argparse
 import gc
@@ -17,12 +6,8 @@ import torch
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
-from CEAT.ceat import run_ceat
+from CEAT.ceat import run_ceat_with_mitigations
 from CrowS_Pairs.crows_pairs import run_crows_pairs
-
-
-
-# ── Argument parsing ──────────────────────────────────────────────────────────
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -60,8 +45,7 @@ def parse_args():
     return parser.parse_args()
 
 
-# ── Device setup ──────────────────────────────────────────────────────────────
-
+# Device setup 
 def get_device():
     if torch.cuda.is_available():
         device = "cuda"
@@ -73,20 +57,13 @@ def get_device():
     return device
 
 
-# ── Model loading ─────────────────────────────────────────────────────────────
+# Model loading 
 
 def load_model(model_name: str, device: str):
-    """
-    Load any causal LM via AutoModel.
-    device_map='auto' is used for larger models so accelerate can distribute
-    layers across available VRAM automatically.
-    For GPT-2 (124M / 774M) this is equivalent to a simple .to(device) call.
-    """
+
     print(f"\n[load] Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
 
-    # GPT-2's tokenizer has no pad token by default — set it to eos so
-    # batched generation and PLL scoring don't raise warnings
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -104,13 +81,9 @@ def load_model(model_name: str, device: str):
     return model, tokenizer
 
 
-# ── Test 1: Generation ────────────────────────────────────────────────────────
-
+# Test 1: Generation 
 def test_generation(model, tokenizer, device: str) -> bool:
-    """
-    Validates that the model can generate text from a prompt.
-    Required for: BOLD sentiment/regard analysis.
-    """
+
     print("\n[test 1] Generation")
     prompt = "The nurse was in a hurry because"
 
@@ -119,9 +92,9 @@ def test_generation(model, tokenizer, device: str) -> bool:
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=20,          # max_new_tokens not max_length — prompt-length agnostic
+            max_new_tokens=20,         
             pad_token_id=tokenizer.eos_token_id,
-            do_sample=False,            # greedy for determinism during testing
+            do_sample=False,           
         )
 
     # Decode only the newly generated tokens, not the prompt
@@ -136,17 +109,8 @@ def test_generation(model, tokenizer, device: str) -> bool:
     return passed
 
 
-# ── Test 2: PLL scoring ───────────────────────────────────────────────────────
-
+# Test 2: PLL scoring
 def test_pll_scoring(model, tokenizer, device: str) -> bool:
-    """
-    Validates pseudo-log-likelihood scoring — the core metric for
-    CrowS-Pairs and StereoSet. Computes the sum of token log-probabilities
-    for two sentences and checks that the model assigns higher PLL to one.
-
-    CrowS-Pairs usage: compare PLL(stereotyped sentence) vs PLL(anti-stereotyped sentence).
-    The model is biased if it consistently assigns higher PLL to stereotyped sentences.
-    """
     print("\n[test 2] PLL scoring")
 
     sentence_a = "The doctor yelled at the nurse because he made a mistake."
@@ -184,15 +148,10 @@ def test_pll_scoring(model, tokenizer, device: str) -> bool:
     return passed
 
 
-# ── Test 3: Token-level log-probability extraction ────────────────────────────
+# Test 3: Token-level log-probability extraction 
 
 def test_token_logprobs(model, tokenizer, device: str) -> bool:
-    """
-    Validates that we can extract the log-probability of a specific token
-    at a specific position. Required for WinoBias coreference scoring and
-    the logit-lens CEAT implementation — both need P(he) and P(she) at
-    a target position rather than sentence-level PLL.
-    """
+
     print("\n[test 3] Token-level log-probability extraction")
 
     prompt = "The engineer designed the bridge because"
@@ -203,7 +162,7 @@ def test_token_logprobs(model, tokenizer, device: str) -> bool:
     with torch.no_grad():
         outputs = model(**inputs)
 
-    # Logits at the final token position — what the model predicts comes next
+    # Logits at the final token position
     last_logits = outputs.logits[0, -1, :]
     log_probs = torch.log_softmax(last_logits, dim=-1)
 
@@ -227,10 +186,7 @@ def test_token_logprobs(model, tokenizer, device: str) -> bool:
     return passed
 
 def test_ceat_embedding(model, tokenizer, device: str) -> bool:
-    """
-    Validates that the model exposes hidden states for CEAT embedding extraction.
-    Required for: intrinsic bias measurement via CEAT.
-    """
+
     print("\n[test 4] CEAT embedding (hidden states)")
     try:
         inputs = tokenizer("This is a test.", return_tensors="pt").to(device)
@@ -247,13 +203,9 @@ def test_ceat_embedding(model, tokenizer, device: str) -> bool:
         print(f"  Result: FAIL — {e}")
         return False
     
-# ── Unload ────────────────────────────────────────────────────────────────────
 
 def unload_model(model, tokenizer):
-    """
-    Explicitly delete model and tokenizer and free VRAM.
-    This is what the outer model loop calls between models to avoid OOM.
-    """
+
     print("\n[unload] Freeing model from memory")
     del model
     del tokenizer
@@ -265,27 +217,10 @@ def unload_model(model, tokenizer):
     print("[unload] Done")
 
 
-# ── Public interface for other scripts ───────────────────────────────────────
+# Public interface for other scripts
 
 def run_tests(model, tokenizer, device: str, skip: bool) -> dict:
-    """
-    Run all three validation tests on a pre-loaded model.
-    Returns a dict of {test_name: bool} so the caller can decide
-    whether to proceed with the evaluation pipeline.
 
-    Called by analyze_bold.py and the outer evaluation loop before
-    running any benchmark — acts as a gate that catches broken model
-    loads before they waste time on a full test battery.
-
-    Example
-    -------
-    from load_model import load_model, run_tests, get_device
-
-    device = get_device()
-    model, tokenizer = load_model("gpt2", device)
-    if all(run_tests(model, tokenizer, device).values()):
-        run_bold(model, tokenizer, ...)
-    """
     if skip:
         return {
             "generation": True,
@@ -302,19 +237,15 @@ def run_tests(model, tokenizer, device: str, skip: bool) -> dict:
     }
 
 
-# ── Main ──────────────────────────────────────────────────────────────────────
-
 def main():
     args = parse_args()
     device = get_device()
 
     model, tokenizer = load_model(args.model, device)
     results = run_tests(model, tokenizer, device, args.skip_tests)
-    unload_model(model, tokenizer)
 
-    print("\n" + "=" * 50)
+    print("\n")
     print(f"VALIDATION SUMMARY — {args.model}")
-    print("=" * 50)
     all_passed = True
     for test_name, passed in results.items():
         status = "PASS" if passed else "FAIL"
@@ -347,7 +278,7 @@ def main():
             print(f"\n[main] Starting CEAT intrinsic bias analysis...")
             results_dir = Path(__file__).resolve().parent / "Results"
             try:
-                run_ceat(
+                run_ceat_with_mitigations(
                     model=model,
                     tokenizer=tokenizer,
                     device=device,
@@ -357,7 +288,7 @@ def main():
                 print(f"[main] CEAT analysis complete.")
             except Exception as e:
                 print(f"[main] ERROR during CEAT analysis: {e}")
-        # ── CrowS-Pairs extrinsic bias measurement ────────────────
+
         if results.get("pll_scoring") and not args.skip_crows_pairs:
             print(f"\n[main] Starting CrowS-Pairs PLL analysis...")
             results_dir = Path(__file__).resolve().parents[2] / "Results" / "CrowS_Pairs"
@@ -379,7 +310,6 @@ def main():
 
     else:
         print(f"  One or more tests failed — check output above.")
-    print("=" * 50)
     unload_model(model, tokenizer)
 
 if __name__ == "__main__":
