@@ -1,5 +1,4 @@
 """
-
 Reference: Nangia et al. (2020) "CrowS-Pairs: A Challenge Dataset for
            Measuring Social Biases in Masked Language Models"
            https://arxiv.org/abs/2010.00133
