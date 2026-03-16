@@ -30,10 +30,6 @@ WORD_SETS = {
 TEMPLATES = [
     "This is {}.",
     "I saw {}.",
-    "We know {}.",
-    "They met {}.",
-    "Here is {}.",
-    "Everyone likes {}.",
     "She talked about {}.",
 ]
 
@@ -73,6 +69,74 @@ CSV_FIELDS = [
     "interpretation", "positive_means", "expected_finding",
     "n_samples",
 ]
+
+_ATTRIBUTE_CACHE = {}
+
+def get_attribute_embeddings(model, tokenizer, device, templates=None):
+    """
+    Compute and cache career/family/pleasant/unpleasant attribute embeddings.
+    Returns cached version if already computed for this model.
+    """
+    if templates is None:
+        templates = TEMPLATES
+    
+    cache_key = id(model)
+    if cache_key not in _ATTRIBUTE_CACHE:
+        print("[ceat] Computing attribute embeddings (cached for reuse)...")
+        _ATTRIBUTE_CACHE[cache_key] = {
+            "A1_career":   get_contextual_embeddings(WORD_SETS["A1_career"],  model, tokenizer, templates, device),
+            "A2_family":   get_contextual_embeddings(WORD_SETS["A2_family"],  model, tokenizer, templates, device),
+            "A3_pleasant": get_contextual_embeddings(WORD_SETS["A3_pleasant"], model, tokenizer, templates, device),
+            "A4_unpleas":  get_contextual_embeddings(WORD_SETS["A4_unpleas"],  model, tokenizer, templates, device),
+        }
+    return _ATTRIBUTE_CACHE[cache_key]
+
+def get_hidden_and_logit_vecs(words, model, tokenizer, templates, device):
+    """
+    Single forward pass per sentence — returns both hidden states (768)
+    and logit projections (50257) simultaneously.
+    Replaces separate get_contextual_embeddings + get_hidden_vec calls.
+    """
+    import torch
+    model_dtype = next(model.parameters()).dtype
+    all_hidden = []
+    all_logits = []
+
+    for word in words:
+        hidden_reps = []
+        logit_reps  = []
+        for tmpl in templates:
+            sentence = tmpl.format(word)
+            enc = tokenizer(sentence, return_tensors="pt").to(device)
+            with torch.no_grad():
+                out = model(**enc, output_hidden_states=True)
+
+            word_ids = tokenizer.encode(" " + word, add_special_tokens=False)
+            full_ids  = enc["input_ids"][0].tolist()
+            idx = []
+            for pos in range(len(full_ids) - len(word_ids) + 1):
+                if full_ids[pos:pos + len(word_ids)] == word_ids:
+                    idx = list(range(pos, pos + len(word_ids)))
+                    break
+
+            last_layer  = out.hidden_states[-1][0]
+            word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
+
+            # Hidden state (768) — for counterfactual arithmetic
+            hidden_reps.append(word_hidden.detach().cpu().float())
+
+            # Logit projection (50257) — for WEAT cosine similarity
+            logit_vec = model.lm_head(
+                word_hidden.to(dtype=model_dtype).unsqueeze(0).unsqueeze(0)
+            ).squeeze()
+            logit_reps.append(logit_vec.detach().cpu().float().numpy())
+
+            del out, enc
+
+        all_hidden.append(torch.stack(hidden_reps).mean(0))
+        all_logits.append(np.mean(logit_reps, axis=0))
+
+    return all_hidden, np.array(all_logits)
 
 # 2.  EMBEDDING EXTRACTION
 
@@ -278,7 +342,6 @@ def run_ceat_interventional(model, tokenizer, device,
     conditions is the causal effect of the gender direction on the
     career/family association.
     """
-    import torch
 
     if output_dir is None:
         output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT"
@@ -414,39 +477,19 @@ def run_ceat_counterfactual(model, tokenizer, device,
     for male_word, female_word in pairs:
         # Get original embeddings — these come back in logit space (50257)
         # via get_contextual_embeddings which calls lm_head internally
-        male_logits  = get_contextual_embeddings(
-            [male_word],   model, tokenizer, TEMPLATES, device)  # (1, 50257)
-        female_logits = get_contextual_embeddings(
-            [female_word], model, tokenizer, TEMPLATES, device)  # (1, 50257)
+        for male_word, female_word in pairs:
+            # One function call per word instead of two
+            (m_hidden_list, m_logits) = get_hidden_and_logit_vecs(
+                [male_word], model, tokenizer, TEMPLATES, device)
+            (f_hidden_list, f_logits) = get_hidden_and_logit_vecs(
+                [female_word], model, tokenizer, TEMPLATES, device)
 
-        # BUT for the counterfactual we need the hidden-state vectors (768)
-        # before lm_head projection, so we extract them separately
-        def get_hidden_vec(word):
-            """Get the averaged last-layer hidden state for a word (768-dim)."""
-            reps = []
-            for tmpl in TEMPLATES:
-                sentence = tmpl.format(word)
-                enc = tokenizer(sentence, return_tensors="pt").to(device)
-                with torch.no_grad():
-                    out = model(**enc, output_hidden_states=True)
+        m_hidden = m_hidden_list[0]   # (768,)
+        f_hidden = f_hidden_list[0]   # (768,)
+        m_logit_orig = m_logits[0]    # (50257,)
+        f_logit_orig = f_logits[0]    # (50257,)
 
-                word_ids = tokenizer.encode(" " + word, add_special_tokens=False)
-                full_ids  = enc["input_ids"][0].tolist()
-                idx = []
-                for pos in range(len(full_ids) - len(word_ids) + 1):
-                    if full_ids[pos:pos + len(word_ids)] == word_ids:
-                        idx = list(range(pos, pos + len(word_ids)))
-                        break
-
-                last_layer  = out.hidden_states[-1][0]
-                word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
-                reps.append(word_hidden.detach().cpu().float())
-                del out, enc
-
-            return torch.stack(reps).mean(0)  # (768,)
-
-        m_hidden = get_hidden_vec(male_word)    # (768,)
-        f_hidden = get_hidden_vec(female_word)  # (768,)
+        # rest of counterfactual arithmetic unchanged
 
         # Decompose hidden states into gender component and residual
         m_demo  = torch.dot(m_hidden, gender_dir) * gender_dir
@@ -468,8 +511,6 @@ def run_ceat_counterfactual(model, tokenizer, device,
                 ).squeeze()
             return logit.detach().cpu().float().numpy()
 
-        m_logit_orig = male_logits[0]           # already (50257,) from get_contextual_embeddings
-        f_logit_orig = female_logits[0]         # already (50257,)
         m_logit_cf   = project(m_cf_hidden)     # (50257,)
         f_logit_cf   = project(f_cf_hidden)     # (50257,)
 
