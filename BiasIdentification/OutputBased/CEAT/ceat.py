@@ -5,6 +5,7 @@ Reference: May et al. (2019) "On Measuring Social Biases in Sentence Encoders"
 """
 
 import numpy as np
+import pandas as pd
 import csv
 import os
 import io
@@ -110,7 +111,7 @@ def get_contextual_embeddings(words, model, tokenizer, templates, device):
 
 
 def cosine(a, b):
-    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10))
+    return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) ))
 
 
 def s_word(w, A, B):
@@ -124,7 +125,7 @@ def effect_size(X, Y, A, B):
     return (np.mean(sX) - np.mean(sY)) / std if std > 0 else 0.0
 
 #change
-def permutation_p(X, Y, A, B, n_perm=1000, rng=None):
+def permutation_p(X, Y, A, B, n_perm=7000, rng=None):
     if rng is None:
         rng = np.random.default_rng(42)
     stat = sum(s_word(x, A, B) for x in X) - sum(s_word(y, A, B) for y in Y)
@@ -168,6 +169,358 @@ def interpret(es):
     elif a < 0.80: return f"Medium {d}"
     else:           return f"Large {d}"
 
+# ══════════════════════════════════════════════════════════════════════
+# PEARL LEVEL 2 — INTERVENTIONAL EMBEDDING ANALYSIS
+# ══════════════════════════════════════════════════════════════════════
+
+def _get_gender_direction_embed(model, tokenizer, device):
+    """
+    Unit gender direction in embedding space (he - she).
+    Used to decompose word embeddings into gender and residual components.
+    """
+    import torch
+    he_id  = tokenizer.encode(" he",  add_special_tokens=False)[0]
+    she_id = tokenizer.encode(" she", add_special_tokens=False)[0]
+    embed  = model.get_input_embeddings()
+    d = embed.weight[he_id].detach().float() - embed.weight[she_id].detach().float()
+    return (d / d.norm()).to(device)
+
+
+def _get_race_direction_embed(model, tokenizer, device):
+    """Unit race direction: mean(European names) - mean(African-American names)."""
+    import torch
+    euro = ["Adam","Chip","Harry","Josh","Roger"]
+    afro = ["Alonzo","Jamel","Lerone","Percell","Theo"]
+    embed = model.get_input_embeddings()
+
+    def mean_vec(names):
+        vecs = []
+        for n in names:
+            ids = tokenizer.encode(" " + n, add_special_tokens=False)
+            if ids:
+                vecs.append(embed.weight[ids[0]].detach().float())
+        return torch.stack(vecs).mean(0) if vecs else torch.zeros(embed.weight.shape[1])
+
+    d = mean_vec(euro) - mean_vec(afro)
+    return (d / (d.norm() + 1e-10)).to(device)
+
+
+def intervene_embeddings(words, model, tokenizer, templates, device,
+                          direction, intervention="neutralise"):
+    import torch
+    all_emb = []
+    
+    # Ensure direction is on CPU, detached, float32 for arithmetic
+    d = direction.detach().cpu().float()
+    
+    for i, word in enumerate(words):
+        reps = []
+        for tmpl in templates:
+            sentence = tmpl.format(word)
+            enc = tokenizer(sentence, return_tensors="pt").to(device)
+            with torch.no_grad():
+                out = model(**enc, output_hidden_states=True)
+
+            word_ids = tokenizer.encode(" " + word, add_special_tokens=False)
+            full_ids  = enc["input_ids"][0].tolist()
+            idx = []
+            for pos in range(len(full_ids) - len(word_ids) + 1):
+                if full_ids[pos:pos + len(word_ids)] == word_ids:
+                    idx = list(range(pos, pos + len(word_ids)))
+                    break
+
+            last_layer  = out.hidden_states[-1][0]
+            word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
+            word_hidden_cpu = word_hidden.detach().cpu().float()
+
+            # Decompose into demographic component and residual
+            demo_component = torch.dot(word_hidden_cpu, d) * d
+            residual       = word_hidden_cpu - demo_component
+
+            if intervention == "neutralise":
+                intervened = residual                    # zero out demographic
+            elif intervention == "swap":
+                intervened = residual - demo_component   # flip demographic
+            else:
+                intervened = word_hidden_cpu
+
+            # Project through lm_head → logit vector (50257,)
+            intervened_device = intervened.to(device)
+            logit_vec = model.lm_head(
+                intervened_device.unsqueeze(0).unsqueeze(0)
+            ).squeeze()  # squeeze() removes all size-1 dims safely
+            
+            reps.append(logit_vec.detach().cpu().float().numpy())
+
+            del out, enc
+
+        all_emb.append(np.mean(reps, axis=0))
+        
+        if i % 8 == 0 and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    return np.array(all_emb)
+
+def run_ceat_interventional(model, tokenizer, device,
+                             model_name="unknown",
+                             output_dir=None):
+    """
+    Pearl Level 2: run CEAT three times per test —
+      1. original embeddings (Level 1 baseline)
+      2. gender-neutralised embeddings — do(gender=neutral)
+      3. gender-swapped embeddings    — do(gender=opposite)
+
+    The difference in effect size between original and intervened
+    conditions is the causal effect of the gender direction on the
+    career/family association.
+    """
+    import torch
+
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT"
+    output_dir = Path(output_dir)
+    slug = model_name.replace("/", "_").replace(" ", "_")
+    run_dir = output_dir / slug
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    gender_dir = _get_gender_direction_embed(model, tokenizer, device)
+    race_dir   = _get_race_direction_embed(model, tokenizer, device)
+
+    conditions = [
+        ("original",    None,       "Level 1 — no intervention"),
+        ("neutralised", gender_dir, "Level 2 — do(gender=neutral)"),
+        ("swapped",     gender_dir, "Level 2 — do(gender=opposite)"),
+    ]
+
+    all_condition_rows = []
+    SEP = "=" * 72
+
+    for condition_name, direction, label in conditions:
+        print(f"\n[ceat-causal] Condition: {label}")
+        condition_rows = []
+
+        for test in TESTS:
+            Xw = WORD_SETS[test["X"]]
+            Yw = WORD_SETS[test["Y"]]
+            Aw = WORD_SETS[test["A"]]
+            Bw = WORD_SETS[test["B"]]
+
+            print(f"  Extracting embeddings [{condition_name}]: {test['name']}")
+
+            if condition_name == "original":
+                X_emb = get_contextual_embeddings(Xw, model, tokenizer, TEMPLATES, device)
+                Y_emb = get_contextual_embeddings(Yw, model, tokenizer, TEMPLATES, device)
+                A_emb = get_contextual_embeddings(Aw, model, tokenizer, TEMPLATES, device)
+                B_emb = get_contextual_embeddings(Bw, model, tokenizer, TEMPLATES, device)
+            else:
+                interv = "neutralise" if condition_name == "neutralised" else "swap"
+                X_emb = intervene_embeddings(Xw, model, tokenizer, TEMPLATES, device, direction, interv)
+                Y_emb = intervene_embeddings(Yw, model, tokenizer, TEMPLATES, device, direction, interv)
+                A_emb = intervene_embeddings(Aw, model, tokenizer, TEMPLATES, device, direction, interv)
+                B_emb = intervene_embeddings(Bw, model, tokenizer, TEMPLATES, device, direction, interv)
+
+            result = ceat(X_emb, Y_emb, A_emb, B_emb, n_samples=100, sample_size=8)
+            es     = result["mean_effect_size"]
+            interp = interpret(es)
+
+            condition_rows.append({
+                "model":            model_name,
+                "condition":        condition_name,
+                "pearl_level":      "L1" if condition_name == "original" else "L2",
+                "intervention":     label,
+                "test_name":        test["name"],
+                "test_type":        test["test_type"],
+                "mean_effect_size": es,
+                "std_effect_size":  result["std_effect_size"],
+                "ci_95_low":        result["ci_95"][0],
+                "ci_95_high":       result["ci_95"][1],
+                "p_value":          result["p_value"],
+                "interpretation":   interp,
+            })
+            print(f"    d = {es:+.4f}  ({interp})")
+
+        all_condition_rows.extend(condition_rows)
+
+    # ── Causal effect table ───────────────────────────────────────────
+    results_df = pd.DataFrame(all_condition_rows) if all_condition_rows else pd.DataFrame()
+
+    print(f"\n{SEP}")
+    print(f"  CEAT CAUSAL EFFECT — {model_name}")
+    print(f"  Causal effect = d(original) - d(intervened)")
+    print(f"  Nonzero effect = gender direction causally drives the association")
+    print(SEP)
+    print(f"  {'Test':<42} {'Original':>10} {'Neutralised':>12} {'Causal D':>10}")
+    print("  " + "-" * 76)
+
+    import pandas as pd_local
+    for test in TESTS:
+        tname = test["name"]
+        orig_row  = next((r for r in all_condition_rows
+                          if r["test_name"] == tname and r["condition"] == "original"), None)
+        neut_row  = next((r for r in all_condition_rows
+                          if r["test_name"] == tname and r["condition"] == "neutralised"), None)
+        if orig_row and neut_row:
+            causal_delta = orig_row["mean_effect_size"] - neut_row["mean_effect_size"]
+            print(f"  {tname[:42]:<42} "
+                  f"{orig_row['mean_effect_size']:>+10.4f} "
+                  f"{neut_row['mean_effect_size']:>+12.4f} "
+                  f"{causal_delta:>+10.4f}")
+    print(SEP)
+
+    # Save
+    csv_path = run_dir / f"CEATResults_{slug}_causal_interventional.csv"
+    if not results_df.empty:
+        results_df.to_csv(csv_path, index=False)
+    print(f"\n[ceat-causal] Saved -> {csv_path}")
+
+    return all_condition_rows
+
+# ══════════════════════════════════════════════════════════════════════
+# PEARL LEVEL 3 — COUNTERFACTUAL WORD EMBEDDINGS
+# ══════════════════════════════════════════════════════════════════════
+
+def run_ceat_counterfactual(model, tokenizer, device,
+                             model_name="unknown",
+                             output_dir=None):
+    import torch
+
+    if output_dir is None:
+        output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT"
+    output_dir = Path(output_dir)
+    slug = model_name.replace("/", "_").replace(" ", "_")
+    run_dir = output_dir / slug
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    gender_dir = _get_gender_direction_embed(model, tokenizer, device).detach().cpu().float()
+    rows = []
+
+    male_words   = WORD_SETS["T1_male"]
+    female_words = WORD_SETS["T2_female"]
+    pairs = list(zip(male_words, female_words))
+
+    # Compute attribute embeddings once — these are in logit space (50257)
+    print(f"\n[ceat-cf] Pre-computing career/family attribute embeddings...")
+    A_emb = get_contextual_embeddings(
+        WORD_SETS["A1_career"], model, tokenizer, TEMPLATES, device)
+    B_emb = get_contextual_embeddings(
+        WORD_SETS["A2_family"], model, tokenizer, TEMPLATES, device)
+
+    print(f"[ceat-cf] Computing counterfactual embeddings for {len(pairs)} word pairs...")
+
+    for male_word, female_word in pairs:
+        # Get original embeddings — these come back in logit space (50257)
+        # via get_contextual_embeddings which calls lm_head internally
+        male_logits  = get_contextual_embeddings(
+            [male_word],   model, tokenizer, TEMPLATES, device)  # (1, 50257)
+        female_logits = get_contextual_embeddings(
+            [female_word], model, tokenizer, TEMPLATES, device)  # (1, 50257)
+
+        # BUT for the counterfactual we need the hidden-state vectors (768)
+        # before lm_head projection, so we extract them separately
+        def get_hidden_vec(word):
+            """Get the averaged last-layer hidden state for a word (768-dim)."""
+            reps = []
+            for tmpl in TEMPLATES:
+                sentence = tmpl.format(word)
+                enc = tokenizer(sentence, return_tensors="pt").to(device)
+                with torch.no_grad():
+                    out = model(**enc, output_hidden_states=True)
+
+                word_ids = tokenizer.encode(" " + word, add_special_tokens=False)
+                full_ids  = enc["input_ids"][0].tolist()
+                idx = []
+                for pos in range(len(full_ids) - len(word_ids) + 1):
+                    if full_ids[pos:pos + len(word_ids)] == word_ids:
+                        idx = list(range(pos, pos + len(word_ids)))
+                        break
+
+                last_layer  = out.hidden_states[-1][0]
+                word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
+                reps.append(word_hidden.detach().cpu().float())
+                del out, enc
+
+            return torch.stack(reps).mean(0)  # (768,)
+
+        m_hidden = get_hidden_vec(male_word)    # (768,)
+        f_hidden = get_hidden_vec(female_word)  # (768,)
+
+        # Decompose hidden states into gender component and residual
+        m_demo  = torch.dot(m_hidden, gender_dir) * gender_dir
+        m_resid = m_hidden - m_demo
+        f_demo  = torch.dot(f_hidden, gender_dir) * gender_dir
+        f_resid = f_hidden - f_demo
+
+        # Construct counterfactual hidden states (still 768-dim)
+        m_cf_hidden = m_resid + f_demo   # male word with female's gender component
+        f_cf_hidden = f_resid + m_demo   # female word with male's gender component
+
+        # Project ALL vectors through lm_head to get logit space (50257)
+        # This matches the space A_emb and B_emb are in
+        def project(hidden_vec):
+            with torch.no_grad():
+                logit = model.lm_head(
+                    hidden_vec.to(device).unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+            return logit.detach().cpu().float().numpy()
+
+        m_logit_orig = male_logits[0]           # already (50257,) from get_contextual_embeddings
+        f_logit_orig = female_logits[0]         # already (50257,)
+        m_logit_cf   = project(m_cf_hidden)     # (50257,)
+        f_logit_cf   = project(f_cf_hidden)     # (50257,)
+
+        # Now all vectors are in the same 50257-dim logit space
+        m_orig_score = s_word(m_logit_orig, A_emb, B_emb)
+        m_cf_score   = s_word(m_logit_cf,   A_emb, B_emb)
+        f_orig_score = s_word(f_logit_orig, A_emb, B_emb)
+        f_cf_score   = s_word(f_logit_cf,   A_emb, B_emb)
+
+        rows.append({
+            "model":                   model_name,
+            "male_word":               male_word,
+            "female_word":             female_word,
+            "male_career_score":       round(float(m_orig_score), 4),
+            "female_career_score":     round(float(f_orig_score), 4),
+            "male_cf_career_score":    round(float(m_cf_score),   4),
+            "female_cf_career_score":  round(float(f_cf_score),   4),
+            "male_ite":                round(float(m_orig_score - m_cf_score),   4),
+            "female_ite":              round(float(f_orig_score - f_cf_score),   4),
+        })
+
+        print(f"[ceat-cf]   {male_word}/{female_word} done")
+
+    cf_df = pd.DataFrame(rows)
+
+    # Summary table
+    SEP = "=" * 66
+    print(f"\n{SEP}")
+    print(f"  CEAT COUNTERFACTUAL (Level 3) -- {model_name}")
+    print(f"  ITE = Individual Treatment Effect")
+    print(f"  male_ite   = career score(male word) - career score(male word if female)")
+    print(f"  female_ite = career score(female word) - career score(female word if male)")
+    print(SEP)
+    print(f"  {'Male':<14} {'Female':<14} {'M score':>8} {'F score':>8} {'M ITE':>8} {'F ITE':>8}")
+    print("  " + "-" * 62)
+    for _, r in cf_df.iterrows():
+        print(f"  {r['male_word']:<14} {r['female_word']:<14} "
+              f"{r['male_career_score']:>+8.4f} {r['female_career_score']:>+8.4f} "
+              f"{r['male_ite']:>+8.4f} {r['female_ite']:>+8.4f}")
+
+    mean_male_ite   = cf_df["male_ite"].mean()
+    mean_female_ite = cf_df["female_ite"].mean()
+    print("  " + "-" * 62)
+    print(f"  {'MEAN':<28} {'':>8} {'':>8} "
+          f"{mean_male_ite:>+8.4f} {mean_female_ite:>+8.4f}")
+    print(f"\n  Mean male ITE > 0   = male words have higher career scores than")
+    print(f"                        their female counterfactuals")
+    print(f"  Mean female ITE < 0 = female words have lower career scores than")
+    print(f"                        their male counterfactuals")
+    print(SEP)
+
+    csv_path = run_dir / f"CEATResults_{slug}_counterfactual_L3.csv"
+    cf_df.to_csv(csv_path, index=False)
+    print(f"\n[ceat-cf] Saved -> {csv_path}")
+
+    return cf_df
 
 def run_ceat_with_mitigations(model, tokenizer, device,
                                model_name="unknown",
@@ -340,7 +693,7 @@ def _run_and_print(model, tokenizer, device, model_name, slug, output_dir):
 
         print("  Running CEAT (500 sub-samples) ...")
         #change
-        result = ceat(X_emb, Y_emb, A_emb, B_emb, n_samples=100, sample_size=8)
+        result = ceat(X_emb, Y_emb, A_emb, B_emb, n_samples=750, sample_size=8)
 
         interp = interpret(result["mean_effect_size"])
         sig    = result["p_value"] < 0.05

@@ -6,8 +6,8 @@ import torch
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
-from CEAT.ceat import run_ceat_with_mitigations
-from CrowS_Pairs.crows_pairs import run_crows_pairs
+from CEAT.ceat import run_ceat_interventional, run_ceat_counterfactual
+from CrowS_Pairs.crows_pairs import run_crows_causal
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -263,7 +263,7 @@ def main():
             results_dir = Path(__file__).resolve().parent / "Results"
             
             try:
-                summary = run_bold(
+                run_bold(
                     model=model,
                     tokenizer=tokenizer,
                     model_name=args.model,
@@ -278,12 +278,15 @@ def main():
             print(f"\n[main] Starting CEAT intrinsic bias analysis...")
             results_dir = Path(__file__).resolve().parent / "Results"
             try:
-                run_ceat_with_mitigations(
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=device,
+                run_ceat_interventional(
+                    model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
-                    output_dir=str(results_dir),
+                    output_dir=str(Path(__file__).resolve().parent / "Results"),
+                )
+                run_ceat_counterfactual(
+                    model=model, tokenizer=tokenizer, device=device,
+                    model_name=args.model,
+                    output_dir=str(Path(__file__).resolve().parent / "Results"),
                 )
                 print(f"[main] CEAT analysis complete.")
             except Exception as e:
@@ -295,13 +298,11 @@ def main():
             dataset_path = (Path(__file__).resolve().parents[2]
                             / "Datasets" / "crows_pairs_anonymized.csv")
             try:
-                run_crows_pairs(
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=device,
+                run_crows_causal(
+                    model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
                     dataset_path=str(dataset_path),
-                    num_samples=50,
+                    num_samples=300,
                     output_dir=str(results_dir),
                 )
                 print(f"[main] CrowS-Pairs analysis complete.")
