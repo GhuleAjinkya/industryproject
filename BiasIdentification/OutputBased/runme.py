@@ -15,8 +15,13 @@ def parse_args():
         "--model",
         type=str,
         default="gpt2",
-        help="HuggingFace model name. Default: gpt2. "
-             "Also accepts: gpt2-large, google/gemma-3-1b, deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
+        help=(
+            "HuggingFace model name. Options:\n"
+            "  gpt2                                          (124M)\n"
+            "  gpt2-large                                    (774M)\n"
+            "  google/gemma-3-1b                             (1B, requires HF login)\n"
+            "  deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B    (1.5B, PLL indicative only)\n"
+        )
     )
     parser.add_argument(
         "--skip-bold",
@@ -60,26 +65,40 @@ def get_device():
 # Model loading 
 
 def load_model(model_name: str, device: str):
-
     print(f"\n[load] Loading tokenizer: {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    print(f"[load] Loading model: {model_name}")
+    if "gemma" in model_name.lower():
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+    elif device == "cpu":
+        dtype = torch.float32
+    else:
+        dtype = torch.float16
+
+    # Gemma 3 needs attn_implementation="sdpa" for stable inference
+    extra_kwargs = {}
+    if "gemma" in model_name.lower():
+        extra_kwargs["attn_implementation"] = "sdpa"
+
+    print(f"[load] Loading model: {model_name} (dtype={dtype})")
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        device_map="auto",      # accelerate handles device placement
-        dtype=torch.float32 if device == "cpu" else torch.float16,
+        device_map="auto",
+        dtype=dtype,
+        trust_remote_code=True,
+        low_cpu_mem_usage=True,
+        **extra_kwargs,
     )
     model.eval()
 
     n_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"[load] Model loaded — {n_params:.0f}M parameters")
-
     return model, tokenizer
-
 
 # Test 1: Generation 
 def test_generation(model, tokenizer, device: str) -> bool:
@@ -241,6 +260,19 @@ def main():
     args = parse_args()
     device = get_device()
 
+    if "gemma" in args.model.lower():
+        try:
+            from huggingface_hub import whoami
+            user = whoami()
+            print(f"[load] HuggingFace user: {user['name']} — proceeding with Gemma load")
+        except Exception:
+            print("[load] WARNING: Not logged into HuggingFace.")
+            print("[load] Run `huggingface-cli login` and accept the Gemma licence at:")
+            print("[load] https://huggingface.co/google/gemma-3-1b")
+            print("[load] Attempting load anyway — will fail if not authorised.")
+
+    model, tokenizer = load_model(args.model, device)
+
     model, tokenizer = load_model(args.model, device)
     results = run_tests(model, tokenizer, device, args.skip_tests)
 
@@ -302,7 +334,7 @@ def main():
                     model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
                     dataset_path=str(dataset_path),
-                    num_samples=300,
+                    num_samples=250,
                     output_dir=str(results_dir),
                 )
                 print(f"[main] CrowS-Pairs analysis complete.")

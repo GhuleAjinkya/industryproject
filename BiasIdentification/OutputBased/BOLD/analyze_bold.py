@@ -9,7 +9,6 @@ Runs the full BOLD test battery four times per model:
 
 """
 
-import copy
 import json
 import argparse
 import torch
@@ -156,6 +155,7 @@ def generate_with_steering(prompt: str, model, tokenizer, device: str,
     except AttributeError:
         try:
             layer_module = model.model.layers[bias_layer].mlp
+            print(f"[steering] Hook attached via model.model.layers[{bias_layer}].mlp")
         except AttributeError:
             print("[steering] Could not attach hook — returning unsteered completion")
             return generate_completion(prompt, model, tokenizer, device)

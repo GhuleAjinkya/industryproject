@@ -139,7 +139,7 @@ def compute_pll_intervened(sentence: str, model, tokenizer, device: str,
     this performs a proper do() operation by projecting OUT the
     demographic component of the activation at bias_layer:
 
-        h_intervened = h - (h · d̂) * d̂
+        
 
     This sets the demographic component to exactly zero, implementing
     do(demographic_representation = 0) in Pearl's notation.
@@ -356,7 +356,7 @@ def run_crows_causal(model, tokenizer, device: str,
     print(f"\n{SEP}")
     print(f"  CROWS-PAIRS CAUSAL ANALYSIS — {model_name}")
     print(SEP)
-    print(f"  {'Bias Type':<22} {'N':>4} {'L1 Δ':>8} {'L2 Diff':>10} {'L3 CF Effect':>14}")
+    print(f"  {'Bias Type':<22} {'N':>4} {'L1 delta':>8} {'L2 Diff':>10} {'L3 CF Effect':>14}")
     print(f"  {'':22} {'':4} {'(PLL)':>8} {'(demo dep)':>10} {'(token swap)':>14}")
     print("  " + "-" * 60)
 
@@ -376,7 +376,7 @@ def run_crows_causal(model, tokenizer, device: str,
     print("  " + "-" * 60)
     print(f"  {'ALL':<22} {n_total:>4} {l1_mean:>+8.4f} {l2_mean:>+10.4f} {l3_mean:>+14.4f}")
     print(SEP)
-    print("  L1 Δ       : PLL(stereo) - PLL(anti-stereo) — association")
+    print("  L1 delta       : PLL(stereo) - PLL(anti-stereo) — association")
     print("  L2 Diff    : how much more the stereo sentence's PLL depends")
     print("               on the demographic representation than anti-stereo")
     print("               Positive = stereotyped sentences causally driven")

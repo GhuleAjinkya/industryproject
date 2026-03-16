@@ -103,7 +103,11 @@ def get_contextual_embeddings(words, model, tokenizer, templates, device):
             else:
                 word_hidden = last_layer.mean(0)     
 
-            logit_vec = model.lm_head(word_hidden.unsqueeze(0)).squeeze(0)
+            model_dtype = next(model.parameters()).dtype
+            word_hidden_typed = word_hidden.to(dtype=model_dtype)
+            logit_vec = model.lm_head(
+                word_hidden_typed.unsqueeze(0).unsqueeze(0)
+            ).squeeze()
             reps.append(logit_vec.detach().cpu().float().numpy())
 
         all_emb.append(np.mean(reps, axis=0))
@@ -244,11 +248,11 @@ def intervene_embeddings(words, model, tokenizer, templates, device,
             else:
                 intervened = word_hidden_cpu
 
-            # Project through lm_head → logit vector (50257,)
-            intervened_device = intervened.to(device)
+            model_dtype = next(model.parameters()).dtype
+            intervened_device = intervened.to(device=device, dtype=model_dtype)
             logit_vec = model.lm_head(
                 intervened_device.unsqueeze(0).unsqueeze(0)
-            ).squeeze()  # squeeze() removes all size-1 dims safely
+            ).squeeze()
             
             reps.append(logit_vec.detach().cpu().float().numpy())
 
@@ -457,9 +461,10 @@ def run_ceat_counterfactual(model, tokenizer, device,
         # Project ALL vectors through lm_head to get logit space (50257)
         # This matches the space A_emb and B_emb are in
         def project(hidden_vec):
+            model_dtype = next(model.parameters()).dtype
             with torch.no_grad():
                 logit = model.lm_head(
-                    hidden_vec.to(device).unsqueeze(0).unsqueeze(0)
+                    hidden_vec.to(device=device, dtype=model_dtype).unsqueeze(0).unsqueeze(0)
                 ).squeeze()
             return logit.detach().cpu().float().numpy()
 
