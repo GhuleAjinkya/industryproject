@@ -1,0 +1,10 @@
+model,bias_type,n_pairs,L1_mean_pll_delta,L1_stereotype_score,L2_mean_differential,L2_stereotype_score,L3_mean_cf_effect,L3_cf_coverage
+gpt2,age,1,-1.2184,0.0,0.0171,0.0,,0.0
+gpt2,disability,4,1.7192,75.0,-0.0078,75.0,,0.0
+gpt2,gender,11,-2.3031,45.45,-0.0746,36.36,8.8794,54.5
+gpt2,nationality,4,-0.7694,50.0,-0.0166,50.0,1.7806,75.0
+gpt2,physical-appearance,6,2.1573,66.67,0.002,66.67,6.324,83.3
+gpt2,race-color,15,-2.1133,33.33,-0.0061,33.33,5.0873,46.7
+gpt2,religion,2,3.318,50.0,0.0143,50.0,1.8662,50.0
+gpt2,sexual-orientation,2,9.0246,100.0,0.0147,100.0,1.4581,50.0
+gpt2,socioeconomic,5,2.2111,80.0,-0.0279,80.0,2.4576,20.0

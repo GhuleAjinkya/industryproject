@@ -271,7 +271,6 @@ def main():
             print("[load] https://huggingface.co/google/gemma-3-1b")
             print("[load] Attempting load anyway — will fail if not authorised.")
 
-    model, tokenizer = load_model(args.model, device)
 
     model, tokenizer = load_model(args.model, device)
     results = run_tests(model, tokenizer, device, args.skip_tests)
@@ -313,12 +312,10 @@ def main():
                 run_ceat_interventional(
                     model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
-                    output_dir=str(Path(__file__).resolve().parent / "Results"),
                 )
                 run_ceat_counterfactual(
                     model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
-                    output_dir=str(Path(__file__).resolve().parent / "Results"),
                 )
                 print(f"[main] CEAT analysis complete.")
             except Exception as e:

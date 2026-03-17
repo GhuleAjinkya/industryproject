@@ -6,6 +6,7 @@ Reference: May et al. (2019) "On Measuring Social Biases in Sentence Encoders"
 
 import numpy as np
 import pandas as pd
+import torch
 import csv
 import os
 import io
@@ -93,18 +94,20 @@ def get_attribute_embeddings(model, tokenizer, device, templates=None):
 
 def get_hidden_and_logit_vecs(words, model, tokenizer, templates, device):
     """
-    Single forward pass per sentence — returns both hidden states (768)
-    and logit projections (50257) simultaneously.
-    Replaces separate get_contextual_embeddings + get_hidden_vec calls.
+    Returns (list of hidden vecs, array of representation vecs).
+    For large-vocab models, representation vecs are normalised hidden states
+    rather than lm_head projections — matches get_contextual_embeddings behaviour.
     """
-    import torch
+    vocab_size = model.get_input_embeddings().weight.shape[0]
+    use_hidden_state = vocab_size > 100000
     model_dtype = next(model.parameters()).dtype
+
     all_hidden = []
-    all_logits = []
+    all_reprs  = []
 
     for word in words:
         hidden_reps = []
-        logit_reps  = []
+        repr_reps   = []
         for tmpl in templates:
             sentence = tmpl.format(word)
             enc = tokenizer(sentence, return_tensors="pt").to(device)
@@ -122,27 +125,42 @@ def get_hidden_and_logit_vecs(words, model, tokenizer, templates, device):
             last_layer  = out.hidden_states[-1][0]
             word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
 
-            # Hidden state (768) — for counterfactual arithmetic
+            # Hidden state always saved for counterfactual arithmetic
             hidden_reps.append(word_hidden.detach().cpu().float())
 
-            # Logit projection (50257) — for WEAT cosine similarity
-            logit_vec = model.lm_head(
-                word_hidden.to(dtype=model_dtype).unsqueeze(0).unsqueeze(0)
-            ).squeeze()
-            logit_reps.append(logit_vec.detach().cpu().float().numpy())
+            # Representation vec — hidden state OR logit depending on vocab
+            if use_hidden_state:
+                vec = word_hidden.detach().cpu().float()
+                vec = vec / (vec.norm() + 1e-10)
+                repr_reps.append(vec.numpy())
+            else:
+                logit_vec = model.lm_head(
+                    word_hidden.to(dtype=model_dtype).unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+                repr_reps.append(logit_vec.detach().cpu().float().numpy())
 
             del out, enc
 
         all_hidden.append(torch.stack(hidden_reps).mean(0))
-        all_logits.append(np.mean(logit_reps, axis=0))
+        all_reprs.append(np.mean(repr_reps, axis=0))
 
-    return all_hidden, np.array(all_logits)
+    return all_hidden, np.array(all_reprs)
 
 # 2.  EMBEDDING EXTRACTION
 
 def get_contextual_embeddings(words, model, tokenizer, templates, device):
-    import torch
     all_emb = []
+    
+    # For large vocab models, hidden state cosine similarity is more
+    # meaningful and vastly faster than projecting to 256K logit space
+    vocab_size = model.get_input_embeddings().weight.shape[0]
+    use_hidden_state = vocab_size > 100000
+    
+    if use_hidden_state:
+        print(f"  [ceat] Large vocab ({vocab_size:,}) — using hidden states directly")
+    
+    model_dtype = next(model.parameters()).dtype
+    
     for word in words:
         reps = []
         for tmpl in templates:
@@ -151,7 +169,6 @@ def get_contextual_embeddings(words, model, tokenizer, templates, device):
             with torch.no_grad():
                 out = model(**enc, output_hidden_states=True)
 
-            # Find the token position(s) of the target word
             word_ids = tokenizer.encode(" " + word, add_special_tokens=False)
             full_ids = enc["input_ids"][0].tolist()
             idx = []
@@ -160,23 +177,27 @@ def get_contextual_embeddings(words, model, tokenizer, templates, device):
                     idx = list(range(i, i + len(word_ids)))
                     break
 
-            # Project the hidden state AT THE WORD POSITION through lm_head
-            last_layer = out.hidden_states[-1][0] 
+            last_layer = out.hidden_states[-1][0]
             if idx:
-                word_hidden = last_layer[idx].mean(0)  
+                word_hidden = last_layer[idx].mean(0)
             else:
-                word_hidden = last_layer.mean(0)     
+                word_hidden = last_layer.mean(0)
 
-            model_dtype = next(model.parameters()).dtype
-            word_hidden_typed = word_hidden.to(dtype=model_dtype)
-            logit_vec = model.lm_head(
-                word_hidden_typed.unsqueeze(0).unsqueeze(0)
-            ).squeeze()
-            reps.append(logit_vec.detach().cpu().float().numpy())
+            if use_hidden_state:
+                # Use normalised hidden state directly — avoids 256K projection
+                vec = word_hidden.detach().cpu().float()
+                vec = vec / (vec.norm() + 1e-10)
+                reps.append(vec.numpy())
+            else:
+                logit_vec = model.lm_head(
+                    word_hidden.to(dtype=model_dtype).unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+                reps.append(logit_vec.detach().cpu().float().numpy())
+
+            del out, enc
 
         all_emb.append(np.mean(reps, axis=0))
     return np.array(all_emb)
-
 
 def cosine(a, b):
     return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) ))
@@ -192,8 +213,7 @@ def effect_size(X, Y, A, B):
     std = np.std(sX + sY, ddof=0)
     return (np.mean(sX) - np.mean(sY)) / std if std > 0 else 0.0
 
-#change
-def permutation_p(X, Y, A, B, n_perm=7000, rng=None):
+def permutation_p(X, Y, A, B, n_perm=5000, rng=None):
     if rng is None:
         rng = np.random.default_rng(42)
     stat = sum(s_word(x, A, B) for x in X) - sum(s_word(y, A, B) for y in Y)
@@ -246,7 +266,7 @@ def _get_gender_direction_embed(model, tokenizer, device):
     Unit gender direction in embedding space (he - she).
     Used to decompose word embeddings into gender and residual components.
     """
-    import torch
+    
     he_id  = tokenizer.encode(" he",  add_special_tokens=False)[0]
     she_id = tokenizer.encode(" she", add_special_tokens=False)[0]
     embed  = model.get_input_embeddings()
@@ -256,7 +276,7 @@ def _get_gender_direction_embed(model, tokenizer, device):
 
 def _get_race_direction_embed(model, tokenizer, device):
     """Unit race direction: mean(European names) - mean(African-American names)."""
-    import torch
+    
     euro = ["Adam","Chip","Harry","Josh","Roger"]
     afro = ["Alonzo","Jamel","Lerone","Percell","Theo"]
     embed = model.get_input_embeddings()
@@ -273,14 +293,14 @@ def _get_race_direction_embed(model, tokenizer, device):
     return (d / (d.norm() + 1e-10)).to(device)
 
 
-def intervene_embeddings(words, model, tokenizer, templates, device,
-                          direction, intervention="neutralise"):
-    import torch
+def intervene_embeddings(words, model, tokenizer, templates, device, direction, intervention="neutralise"):
     all_emb = []
-    
-    # Ensure direction is on CPU, detached, float32 for arithmetic
     d = direction.detach().cpu().float()
     
+    vocab_size = model.get_input_embeddings().weight.shape[0]
+    use_hidden_state = vocab_size > 100000
+    model_dtype = next(model.parameters()).dtype
+
     for i, word in enumerate(words):
         reps = []
         for tmpl in templates:
@@ -301,37 +321,36 @@ def intervene_embeddings(words, model, tokenizer, templates, device,
             word_hidden = last_layer[idx].mean(0) if idx else last_layer.mean(0)
             word_hidden_cpu = word_hidden.detach().cpu().float()
 
-            # Decompose into demographic component and residual
             demo_component = torch.dot(word_hidden_cpu, d) * d
             residual       = word_hidden_cpu - demo_component
 
             if intervention == "neutralise":
-                intervened = residual                    # zero out demographic
+                intervened = residual
             elif intervention == "swap":
-                intervened = residual - demo_component   # flip demographic
+                intervened = residual - demo_component
             else:
                 intervened = word_hidden_cpu
 
-            model_dtype = next(model.parameters()).dtype
-            intervened_device = intervened.to(device=device, dtype=model_dtype)
-            logit_vec = model.lm_head(
-                intervened_device.unsqueeze(0).unsqueeze(0)
-            ).squeeze()
-            
-            reps.append(logit_vec.detach().cpu().float().numpy())
+            if use_hidden_state:
+                vec = intervened / (intervened.norm() + 1e-10)
+                reps.append(vec.numpy())
+            else:
+                intervened_device = intervened.to(device=device, dtype=model_dtype)
+                logit_vec = model.lm_head(
+                    intervened_device.unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+                reps.append(logit_vec.detach().cpu().float().numpy())
 
             del out, enc
 
         all_emb.append(np.mean(reps, axis=0))
-        
+
         if i % 8 == 0 and torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     return np.array(all_emb)
 
-def run_ceat_interventional(model, tokenizer, device,
-                             model_name="unknown",
-                             output_dir=None):
+def run_ceat_interventional(model, tokenizer, device, model_name="unknown", output_dir=None):
     """
     Pearl Level 2: run CEAT three times per test —
       1. original embeddings (Level 1 baseline)
@@ -449,14 +468,16 @@ def run_ceat_interventional(model, tokenizer, device,
 def run_ceat_counterfactual(model, tokenizer, device,
                              model_name="unknown",
                              output_dir=None):
-    import torch
-
     if output_dir is None:
         output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT"
     output_dir = Path(output_dir)
     slug = model_name.replace("/", "_").replace(" ", "_")
     run_dir = output_dir / slug
     run_dir.mkdir(parents=True, exist_ok=True)
+
+    vocab_size = model.get_input_embeddings().weight.shape[0]
+    use_hidden_state = vocab_size > 100000
+    model_dtype = next(model.parameters()).dtype
 
     gender_dir = _get_gender_direction_embed(model, tokenizer, device).detach().cpu().float()
     rows = []
@@ -465,65 +486,69 @@ def run_ceat_counterfactual(model, tokenizer, device,
     female_words = WORD_SETS["T2_female"]
     pairs = list(zip(male_words, female_words))
 
-    # Compute attribute embeddings once — these are in logit space (50257)
     print(f"\n[ceat-cf] Pre-computing career/family attribute embeddings...")
     A_emb = get_contextual_embeddings(
         WORD_SETS["A1_career"], model, tokenizer, TEMPLATES, device)
     B_emb = get_contextual_embeddings(
         WORD_SETS["A2_family"], model, tokenizer, TEMPLATES, device)
 
+    # Project a counterfactual hidden state into the same space as A_emb/B_emb
+    def project_cf(hidden_vec):
+        """
+        Convert a counterfactual hidden state into the same representation
+        space that get_contextual_embeddings uses for this model.
+        For large-vocab models: normalise the hidden state (1152-dim).
+        For small-vocab models: project through lm_head (50257-dim).
+        """
+        if use_hidden_state:
+            vec = hidden_vec.float()
+            vec = vec / (vec.norm() + 1e-10)
+            return vec.numpy()
+        else:
+            with torch.no_grad():
+                logit = model.lm_head(
+                    hidden_vec.to(device=device, dtype=model_dtype)
+                    .unsqueeze(0).unsqueeze(0)
+                ).squeeze()
+            return logit.detach().cpu().float().numpy()
+
     print(f"[ceat-cf] Computing counterfactual embeddings for {len(pairs)} word pairs...")
 
     for male_word, female_word in pairs:
-        # Get original embeddings — these come back in logit space (50257)
-        # via get_contextual_embeddings which calls lm_head internally
-        for male_word, female_word in pairs:
-            # One function call per word instead of two
-            (m_hidden_list, m_logits) = get_hidden_and_logit_vecs(
-                [male_word], model, tokenizer, TEMPLATES, device)
-            (f_hidden_list, f_logits) = get_hidden_and_logit_vecs(
-                [female_word], model, tokenizer, TEMPLATES, device)
+        (m_hidden_list, m_reprs) = get_hidden_and_logit_vecs(
+            [male_word], model, tokenizer, TEMPLATES, device)
+        (f_hidden_list, f_reprs) = get_hidden_and_logit_vecs(
+            [female_word], model, tokenizer, TEMPLATES, device)
 
-        m_hidden = m_hidden_list[0]   # (768,)
-        f_hidden = f_hidden_list[0]   # (768,)
-        m_logit_orig = m_logits[0]    # (50257,)
-        f_logit_orig = f_logits[0]    # (50257,)
+        m_hidden = m_hidden_list[0]   # (hidden_dim,) — always raw hidden state
+        f_hidden = f_hidden_list[0]   # (hidden_dim,)
+        m_repr_orig = m_reprs[0]      # (hidden_dim or vocab,) — matched to A_emb
+        f_repr_orig = f_reprs[0]      # same
 
-        # rest of counterfactual arithmetic unchanged
-
-        # Decompose hidden states into gender component and residual
+        # Counterfactual arithmetic in hidden state space
         m_demo  = torch.dot(m_hidden, gender_dir) * gender_dir
         m_resid = m_hidden - m_demo
         f_demo  = torch.dot(f_hidden, gender_dir) * gender_dir
         f_resid = f_hidden - f_demo
 
-        # Construct counterfactual hidden states (still 768-dim)
-        m_cf_hidden = m_resid + f_demo   # male word with female's gender component
-        f_cf_hidden = f_resid + m_demo   # female word with male's gender component
+        m_cf_hidden = m_resid + f_demo   # male word with female gender component
+        f_cf_hidden = f_resid + m_demo   # female word with male gender component
 
-        # Project ALL vectors through lm_head to get logit space (50257)
-        # This matches the space A_emb and B_emb are in
-        def project(hidden_vec):
-            model_dtype = next(model.parameters()).dtype
-            with torch.no_grad():
-                logit = model.lm_head(
-                    hidden_vec.to(device=device, dtype=model_dtype).unsqueeze(0).unsqueeze(0)
-                ).squeeze()
-            return logit.detach().cpu().float().numpy()
+        # Project counterfactuals into same space as A_emb/B_emb
+        m_repr_cf = project_cf(m_cf_hidden)
+        f_repr_cf = project_cf(f_cf_hidden)
 
-        m_logit_cf   = project(m_cf_hidden)     # (50257,)
-        f_logit_cf   = project(f_cf_hidden)     # (50257,)
-
-        # Now all vectors are in the same 50257-dim logit space
-        m_orig_score = s_word(m_logit_orig, A_emb, B_emb)
-        m_cf_score   = s_word(m_logit_cf,   A_emb, B_emb)
-        f_orig_score = s_word(f_logit_orig, A_emb, B_emb)
-        f_cf_score   = s_word(f_logit_cf,   A_emb, B_emb)
+        # All four vectors now in same space as A_emb and B_emb
+        m_orig_score = s_word(m_repr_orig, A_emb, B_emb)
+        m_cf_score   = s_word(m_repr_cf,   A_emb, B_emb)
+        f_orig_score = s_word(f_repr_orig, A_emb, B_emb)
+        f_cf_score   = s_word(f_repr_cf,   A_emb, B_emb)
 
         rows.append({
             "model":                   model_name,
             "male_word":               male_word,
             "female_word":             female_word,
+            "representation_space":    "hidden_state" if use_hidden_state else "logit",
             "male_career_score":       round(float(m_orig_score), 4),
             "female_career_score":     round(float(f_orig_score), 4),
             "male_cf_career_score":    round(float(m_cf_score),   4),
@@ -536,10 +561,11 @@ def run_ceat_counterfactual(model, tokenizer, device,
 
     cf_df = pd.DataFrame(rows)
 
-    # Summary table
     SEP = "=" * 66
     print(f"\n{SEP}")
     print(f"  CEAT COUNTERFACTUAL (Level 3) -- {model_name}")
+    repr_label = "hidden state" if use_hidden_state else "logit"
+    print(f"  Representation space: {repr_label} ({A_emb.shape[1]}-dim)")
     print(f"  ITE = Individual Treatment Effect")
     print(f"  male_ite   = career score(male word) - career score(male word if female)")
     print(f"  female_ite = career score(female word) - career score(female word if male)")
@@ -556,10 +582,6 @@ def run_ceat_counterfactual(model, tokenizer, device,
     print("  " + "-" * 62)
     print(f"  {'MEAN':<28} {'':>8} {'':>8} "
           f"{mean_male_ite:>+8.4f} {mean_female_ite:>+8.4f}")
-    print(f"\n  Mean male ITE > 0   = male words have higher career scores than")
-    print(f"                        their female counterfactuals")
-    print(f"  Mean female ITE < 0 = female words have lower career scores than")
-    print(f"                        their male counterfactuals")
     print(SEP)
 
     csv_path = run_dir / f"CEATResults_{slug}_counterfactual_L3.csv"
@@ -572,7 +594,7 @@ def run_ceat_with_mitigations(model, tokenizer, device,
                                model_name="unknown",
                                output_dir=None):
     from sklearn.decomposition import PCA
-    import torch
+    
 
     if output_dir is None:
         output_dir = Path(__file__).resolve().parents[3] / "Results" / "CEAT"
@@ -613,7 +635,7 @@ def _apply_inlp_for_ceat(model, tokenizer, device, n_components=5):
     """Same INLP projection used in analyze_bold — kept local to avoid circular import."""
     import numpy as np
     from sklearn.decomposition import PCA
-    import torch
+    
 
     gender_pairs = [
         ("he","she"),("him","her"),("his","hers"),
@@ -635,7 +657,7 @@ def _apply_inlp_for_ceat(model, tokenizer, device, n_components=5):
 
     pca = PCA(n_components=n_components)
     pca.fit(np.array(X))
-    import torch
+    
     V = torch.tensor(pca.components_, dtype=torch.float32).to(device)
     P = torch.eye(V.shape[1], device=device) - V.t().mm(V)
 
@@ -844,7 +866,7 @@ def main():
 
     # Normal path: load model then call run_ceat
     try:
-        import torch
+        
         from transformers import AutoModelForCausalLM, AutoTokenizer
     except ImportError:
         print("[ERROR] transformers / torch not installed. Use --mock for demo mode.")

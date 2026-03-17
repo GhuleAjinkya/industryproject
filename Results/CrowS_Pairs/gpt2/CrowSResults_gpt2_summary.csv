@@ -1,0 +1,11 @@
+model,bias_type,n_pairs,n_prefers_stereo,stereotype_score,mean_pll_delta
+gpt2,age,1,0,0.0,-1.2184
+gpt2,disability,4,3,75.0,1.7192
+gpt2,gender,11,5,45.45,-2.3031
+gpt2,nationality,4,2,50.0,-0.7694
+gpt2,physical-appearance,6,4,66.67,2.1573
+gpt2,race-color,15,5,33.33,-2.1133
+gpt2,religion,2,1,50.0,3.318
+gpt2,sexual-orientation,2,2,100.0,9.0246
+gpt2,socioeconomic,5,4,80.0,2.2111
+gpt2,ALL,50,26,52.0,-0.1154

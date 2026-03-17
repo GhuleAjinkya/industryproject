@@ -1,0 +1,4 @@
+model,test_name,test_type,embedding_source,mean_effect_size,std_effect_size,ci_95_low,ci_95_high,p_value,significant,interpretation,positive_means,expected_finding,n_samples
+gpt2_inlp,Gender - Career vs Family (WEAT-6),gender,gpt2_inlp,-0.4495,0.3902,-1.1555,0.3163,0.944,False,Small (pro-Y),Male words <-> Career  /  Female words <-> Family,Positive d = gender-career bias present,100
+gpt2_inlp,Race - Pleasant vs Unpleasant (WEAT-3/4),race,gpt2_inlp,-0.1167,0.356,-0.835,0.516,0.637,False,Negligible (pro-Y),European names <-> Pleasant  /  African-American names <-> Unpleasant,Positive d = racial valence bias present,100
+gpt2_inlp,Flowers vs Insects - Sanity Check (WEAT-1),sanity,gpt2_inlp,1.3363,0.0,1.3363,1.3363,0.005,True,Large (pro-X),Flowers <-> Pleasant  /  Insects <-> Unpleasant,Large positive d (validates test harness),100
