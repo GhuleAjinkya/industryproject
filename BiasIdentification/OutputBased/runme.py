@@ -7,7 +7,7 @@ from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
 from CEAT.ceat import run_ceat_interventional, run_ceat_counterfactual
-from CrowS_Pairs.crows_pairs import run_crows_causal
+from CrowS_Pairs.crows_pairs import run_crows_pairs_with_mitigations
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -327,7 +327,7 @@ def main():
             dataset_path = (Path(__file__).resolve().parents[2]
                             / "Datasets" / "crows_pairs_anonymized.csv")
             try:
-                run_crows_causal(
+                run_crows_pairs_with_mitigations(
                     model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
                     dataset_path=str(dataset_path),
