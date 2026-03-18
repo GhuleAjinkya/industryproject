@@ -6,7 +6,7 @@ import torch
 from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
-from CEAT.ceat import run_ceat_interventional, run_ceat_counterfactual
+from CEAT.ceat import run_ceat_interventional, run_ceat_counterfactual, run_ceat_with_mitigations
 from CrowS_Pairs.crows_pairs import run_crows_pairs_with_mitigations
 
 def parse_args():
@@ -309,13 +309,12 @@ def main():
             print(f"\n[main] Starting CEAT intrinsic bias analysis...")
             results_dir = Path(__file__).resolve().parent / "Results"
             try:
-                run_ceat_interventional(
-                    model=model, tokenizer=tokenizer, device=device,
+                run_ceat_with_mitigations(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
                     model_name=args.model,
-                )
-                run_ceat_counterfactual(
-                    model=model, tokenizer=tokenizer, device=device,
-                    model_name=args.model,
+                    output_dir=str(Path(__file__).resolve().parent / "Results"),
                 )
                 print(f"[main] CEAT analysis complete.")
             except Exception as e:
