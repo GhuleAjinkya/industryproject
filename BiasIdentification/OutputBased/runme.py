@@ -1,5 +1,3 @@
-
-
 import argparse
 import gc
 import torch
@@ -7,7 +5,7 @@ from pathlib import Path
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from BOLD.analyze_bold import run_bold
 from CEAT.ceat import run_ceat_interventional, run_ceat_counterfactual, run_ceat_with_mitigations
-from CrowS_Pairs.crows_pairs import run_crows_pairs_with_mitigations
+from CrowS_Pairs.crows_pairs import run_crows_pairs_with_mitigations, run_crows_pairs, run_crows_causal
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -27,19 +25,19 @@ def parse_args():
         "--skip-bold",
         action="store_true",
         default=False,
-        help="Skip BOLD analysis after validation (useful for quick testing)"
+        help="Skip BOLD analysis after validation"
     )
     parser.add_argument(
         "--skip-ceat",
         action="store_true",
         default=False,
-        help="Skip CEAT analysis after validation (useful for quick testing)"
+        help="Skip CEAT analysis after validation"
     )
     parser.add_argument(
         "--skip-crows-pairs",
         action="store_true",
         default=False,
-        help="Skip CrowS-Pairs analysis after validation (useful for quick testing)"
+        help="Skip CrowS-Pairs analysis after validation"
     )
     parser.add_argument(
         "--skip-tests",
@@ -63,7 +61,6 @@ def get_device():
 
 
 # Model loading 
-
 def load_model(model_name: str, device: str):
     print(f"\n[load] Loading tokenizer: {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(
@@ -80,7 +77,6 @@ def load_model(model_name: str, device: str):
     else:
         dtype = torch.float16
 
-    # Gemma 3 needs attn_implementation="sdpa" for stable inference
     extra_kwargs = {}
     if "gemma" in model_name.lower():
         extra_kwargs["attn_implementation"] = "sdpa"
@@ -116,7 +112,6 @@ def test_generation(model, tokenizer, device: str) -> bool:
             do_sample=False,           
         )
 
-    # Decode only the newly generated tokens, not the prompt
     new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
     completion = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
@@ -168,7 +163,6 @@ def test_pll_scoring(model, tokenizer, device: str) -> bool:
 
 
 # Test 3: Token-level log-probability extraction 
-
 def test_token_logprobs(model, tokenizer, device: str) -> bool:
 
     print("\n[test 3] Token-level log-probability extraction")
@@ -234,9 +228,6 @@ def unload_model(model, tokenizer):
         allocated = torch.cuda.memory_allocated() / 1e9
         print(f"[unload] VRAM after unload: {allocated:.2f} GB allocated")
     print("[unload] Done")
-
-
-# Public interface for other scripts
 
 def run_tests(model, tokenizer, device: str, skip: bool) -> dict:
 
@@ -309,6 +300,16 @@ def main():
             print(f"\n[main] Starting CEAT intrinsic bias analysis...")
             results_dir = Path(__file__).resolve().parent / "Results"
             try:
+                run_ceat_interventional(
+                    model=model, tokenizer=tokenizer, device=device,
+                    model_name=args.model,
+                    output_dir=str(Path(__file__).resolve().parent / "Results"),
+                )
+                run_ceat_counterfactual(
+                    model=model, tokenizer=tokenizer, device=device,
+                    model_name=args.model,
+                    output_dir=str(Path(__file__).resolve().parent / "Results"),
+                )
                 run_ceat_with_mitigations(
                     model=model,
                     tokenizer=tokenizer,
@@ -326,6 +327,22 @@ def main():
             dataset_path = (Path(__file__).resolve().parents[2]
                             / "Datasets" / "crows_pairs_anonymized.csv")
             try:
+                run_crows_pairs(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    model_name=args.model,
+                    dataset_path=str(dataset_path),
+                    num_samples=250,
+                    output_dir=str(results_dir),
+                )
+                run_crows_causal(
+                    model=model, tokenizer=tokenizer, device=device,
+                    model_name=args.model,
+                    dataset_path=str(dataset_path),
+                    num_samples=250,
+                    output_dir=str(results_dir),
+                )
                 run_crows_pairs_with_mitigations(
                     model=model, tokenizer=tokenizer, device=device,
                     model_name=args.model,
